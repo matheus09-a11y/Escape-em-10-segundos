@@ -1,0 +1,22 @@
+<!doctype html><meta charset="utf-8"><title>Verificador</title>
+<body style="font:15px monospace;white-space:pre-wrap;background:#111;color:#0f0;padding:12px"><div id="o">Analisando…</div></body>
+<script src="../levels.js"></script>
+<script src="../missions.js"></script>
+<script>
+  const N = window.LEVELS.length, res = new Array(N), t0 = performance.now();
+  const only = (new URLSearchParams(location.search).get('only') || '').split(',').filter(Boolean).map((x) => +x - 1); // ?only=16,17 (fases)
+  const wantM = new URLSearchParams(location.search).get('missions'); // ?missions=1 verifica só as 12 missões
+  const idxs = wantM ? window.MISSIONS.map((_, k) => 100 + k) : only.length ? only : [...Array(N).keys()];
+  let got = 0;
+  for (const i of idxs) {
+    const w = new Worker("verify-worker.js");
+    w.onmessage = (e) => {
+      res[e.data.i] = e.data; got++;
+      const lines = idxs.map((k) => (res[k] ? res[k].line : `Item ${k >= 100 ? 'missão ' + (k - 99) : 'fase ' + (k + 1)}: …`));
+      if (got === idxs.length) { lines.push(idxs.every((k) => res[k] && res[k].ok) ? "\nTUDO OK" : "\nHÁ FALHAS"); lines.push(((performance.now() - t0) / 1000).toFixed(0) + " s"); window.VERIFY_DONE = true; }
+      document.getElementById("o").textContent = lines.join("\n");
+    };
+    w.onerror = (e) => { document.getElementById("o").textContent += "\nERRO worker " + (i + 1) + ": " + e.message; };
+    w.postMessage(i);
+  }
+</script>

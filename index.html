@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#07060f">
+  <title>Dez segundos para fugir</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app">
+    <header id="hud">
+      <div class="hud-item"><span class="hud-label">FASE</span><span id="hud-level">1/20</span></div>
+      <div class="hud-item"><span class="hud-label">CHAVE ◎</span><span><span id="hud-key" class="key-off">✖</span> <span id="hud-coin" class="coin-off">○</span></span></div>
+      <div class="hud-item"><span class="hud-label">IMPULSO</span><span id="hud-dash" class="dash-on">⚡</span></div>
+      <div class="hud-item"><span class="hud-label" id="hud-timer-label">TEMPO</span><span id="hud-timer">10.0</span><span class="bar" id="hud-bar-wrap"><i id="hud-bar"></i></span></div>
+      <button id="btn-levels" class="hud-btn" aria-label="Escolher fase">☰</button>
+      <button id="btn-retry-hud" class="hud-btn" aria-label="Tentar novamente (R)">↻</button>
+    </header>
+    <div id="hint"></div>
+
+    <main id="stage">
+      <canvas id="game" aria-label="Área do jogo"></canvas>
+      <div id="overlay" class="hidden">
+        <div class="panel">
+          <h1 id="ov-title"></h1>
+          <p id="ov-text"></p>
+          <div id="ov-extra"></div>
+          <div id="ov-menu" class="hidden"></div>
+          <div class="ov-actions" id="ov-actions">
+            <button id="ov-primary" class="btn"></button>
+            <button id="ov-secondary" class="btn btn-ghost hidden"></button>
+            <button id="ov-tertiary" class="btn btn-ghost hidden"></button>
+            <button id="ov-quaternary" class="btn btn-ghost hidden"></button>
+            <button id="ov-quinary" class="btn btn-ghost hidden"></button>
+            <button id="ov-senary" class="btn btn-ghost hidden"></button>
+          </div>
+          <p id="ov-foot" class="foot hidden"></p>
+        </div>
+      </div>
+      <button id="skip" class="btn btn-ghost hidden">Pular ⏭</button>
+      <div id="settings" class="hidden">
+        <div class="panel">
+          <h1>Configurações</h1>
+          <label class="row"><input type="checkbox" id="set-sound"> <span>Efeitos sonoros</span></label>
+          <label class="row"><span>Volume</span> <input type="range" id="set-volume" min="0" max="100" step="5"> <output id="set-volume-out"></output></label>
+          <div class="row"><span>Tempo por sala</span> <button id="set-time" class="btn btn-ghost"></button></div>
+          <label class="row"><span>Controles na tela</span> <select id="set-touch"><option value="auto">Automático</option><option value="on">Mostrar</option><option value="off">Ocultar</option></select></label>
+          <label class="row"><input type="checkbox" id="set-reduce"> <span>Reduzir efeitos visuais e tremores</span></label>
+          <p id="set-note"></p>
+          <div class="set-group" role="group" aria-label="Progresso e backup">
+            <b>Progresso e backup</b>
+            <div class="set-btns">
+              <button id="set-export" class="btn btn-ghost">Exportar progresso</button>
+              <button id="set-import" class="btn btn-ghost">Importar progresso</button>
+              <button id="set-erase" class="btn btn-ghost danger">Apagar progresso</button>
+            </div>
+            <small>O progresso fica salvo neste navegador e não é sincronizado automaticamente entre dispositivos. Use o backup para levar seus dados a outro lugar.</small>
+          </div>
+          <button id="set-back" class="btn">Voltar</button>
+        </div>
+      </div>
+      <div id="editor" class="ed-panel hidden">
+        <div class="ed-top">
+          <input id="ed-name" maxlength="40" autocomplete="off" placeholder="Nome da fase (até 40 caracteres)" aria-label="Nome da fase">
+          <span id="ed-status" class="ed-status"></span>
+        </div>
+        <div id="ed-wrap"><canvas id="ed-canvas" tabindex="0" aria-label="Grade de edição 40 por 25. Toque ou arraste para colocar elementos. Com teclado: setas movem o cursor, Enter aplica a ferramenta, Delete apaga, E seleciona."></canvas></div>
+        <div id="ed-msg" role="status" aria-live="polite"></div>
+        <div id="ed-tools" aria-label="Ferramentas"></div>
+        <div id="ed-props" class="ed-props" aria-live="polite" aria-label="Propriedades do elemento selecionado"></div>
+        <div class="ed-actions">
+          <button id="ed-undo" class="btn btn-ghost" aria-label="Desfazer">↶ Desfazer</button>
+          <button id="ed-redo" class="btn btn-ghost" aria-label="Refazer">↷ Refazer</button>
+          <button id="ed-check" class="btn btn-ghost">🔎 Verificar</button>
+          <button id="ed-test" class="btn">▶ Testar</button>
+          <button id="ed-save" class="btn">💾 Salvar</button>
+          <button id="ed-clear" class="btn btn-ghost">🧹 Limpar mapa</button>
+          <button id="ed-help" class="btn btn-ghost" aria-expanded="false">? Ajuda</button>
+          <button id="ed-exit" class="btn btn-ghost">✕ Sair</button>
+        </div>
+        <div id="ed-helptext" class="hidden">
+          <b>Como usar:</b> escolha uma ferramenta (Estrutura, Objetivos, Perigos, Mecanismos) e toque ou clique na grade; arraste para pintar terreno (cada arrasto é uma ação que dá para desfazer).
+          Ao tocar num laser, drone, portal, interruptor ou porta, o painel abaixo do mapa mostra as propriedades. Sem mouse: foque o mapa (Tab), mova o cursor com as setas, Enter aplica a ferramenta, Delete apaga, E seleciona; ou escolha o elemento na lista do painel.
+          <b>Portais:</b> até 3 pares (A ◆, B ●, C ▲); o par precisa das duas pontas. <b>Interruptores:</b> abrem as portas ligadas até o fim da tentativa; cada porta tem um só interruptor.
+          <b>Lasers</b> param na primeira parede (a extensão real aparece no mapa). <b>Drones:</b> até 4, rota por pontos da grade, ida e volta ou circuito fechado.
+          O personagem é um pouco maior que um quadrado: corredores precisam de pelo menos 2 quadrados. Ctrl+Z desfaz, Ctrl+Y refaz.
+          <b>Confiança:</b> 1) estrutura válida, 2) percurso (considera portais e interruptores; lasers e drones não contam como paredes), 3) teste jogável — só concluir a fase confirma tempo e dificuldade. Para compartilhar é preciso concluir a fase nesta revisão (confirmação local, sem verificação online).
+        </div>
+      </div>
+      <div id="coop" class="ed-panel hidden" role="region" aria-label="Modo online cooperativo">
+        <div id="co-banner" role="status" aria-live="polite"></div>
+        <section id="co-connect" class="co-view">
+          <div class="panel panel-wide">
+            <h1>Online · 3 jogadores</h1>
+            <p class="lead">Cooperativo: cada jogador tem um papel e <b>só chegam à porta se se ajudarem</b>. Falem por voz (ligação, Discord…) enquanto jogam.</p>
+            <label class="co-field"><span>Seu apelido</span><input id="co-name" maxlength="14" autocomplete="off" placeholder="Jogador"></label>
+            <div id="co-srv-row" class="co-field hidden"><span id="co-srv-note"></span><input id="co-url" autocomplete="off" inputmode="url" placeholder="wss://meu-servidor.onrender.com" aria-label="Endereço do servidor"></div>
+            <div class="ov-actions">
+              <button id="co-create" class="btn">Criar sala</button>
+              <div class="co-or">ou entre com o código</div>
+              <div class="co-join-row"><input id="co-code" maxlength="4" autocomplete="off" autocapitalize="characters" placeholder="ABCD" aria-label="Código da sala (4 letras)"><button id="co-join" class="btn">Entrar</button></div>
+              <button id="co-back" class="btn btn-ghost">Voltar ao menu</button>
+            </div>
+          </div>
+        </section>
+        <section id="co-lobby" class="co-view hidden">
+          <div class="panel panel-wide">
+            <h1>Sala <span id="co-code-big" class="co-code"></span></h1>
+            <div class="co-row"><button id="co-copy" class="btn btn-ghost">📋 Copiar convite</button></div>
+            <ul id="co-slots" class="co-slots" aria-label="Jogadores da sala"></ul>
+            <div class="co-h">Escolha seu papel</div>
+            <div id="co-roles" class="co-roles" role="radiogroup" aria-label="Papéis"></div>
+            <label class="co-field"><span>Fase</span><select id="co-level" aria-describedby="co-level-note"></select></label>
+            <p id="co-level-note" class="notes"></p>
+            <p id="co-start-note" class="notes" role="status"></p>
+            <div class="ov-actions">
+              <button id="co-start" class="btn">Começar ▶</button>
+              <button id="co-leave" class="btn btn-ghost">Sair da sala</button>
+            </div>
+          </div>
+        </section>
+        <section id="co-game" class="co-view hidden">
+          <div id="co-hud">
+            <div class="co-h1"><b id="co-lvname"></b><span id="co-att"></span><span id="co-ping"></span></div>
+            <div class="co-h2"><span id="co-timer">--</span><span class="bar"><i id="co-bar"></i></span><span id="co-key"></span></div>
+            <div id="co-chips"></div>
+          </div>
+          <div id="co-cwrap"><div id="co-banner2" role="status" aria-live="polite"></div><canvas id="co-canvas" aria-label="Área do jogo cooperativo. Use as setas ou WASD para andar; teclas 1 a 6 enviam mensagens rápidas."></canvas><div id="co-result" class="hidden"></div></div>
+          <div id="co-hint"></div>
+          <div id="co-bottom">
+            <div id="co-pad" aria-label="Controles de direção">
+              <button class="dir up" data-k="u" aria-label="Cima">▲</button>
+              <button class="dir left" data-k="l" aria-label="Esquerda">◀</button>
+              <button class="dir right" data-k="r" aria-label="Direita">▶</button>
+              <button class="dir down" data-k="d" aria-label="Baixo">▼</button>
+            </div>
+            <div id="co-emos" aria-label="Mensagens rápidas"></div>
+            <div class="co-acts"><button id="co-restart" class="btn btn-ghost">↻ Reiniciar</button><button id="co-menu" class="btn btn-ghost">☰ Menu</button></div>
+          </div>
+          <div id="co-pop" class="hidden"><div class="panel">
+            <h1>Pausa do menu</h1>
+            <p>O jogo dos outros continua. Sair da sala encerra a partida para os 3.</p>
+            <div class="ov-actions">
+              <button id="co-pop-continue" class="btn">Continuar</button>
+              <button id="co-pop-lobby" class="btn btn-ghost">Voltar à sala (todos)</button>
+              <button id="co-pop-leave" class="btn btn-ghost danger">Sair da sala</button>
+            </div>
+          </div></div>
+        </section>
+      </div>
+      <div id="mymaps" class="ed-panel hidden">
+        <div class="panel panel-wide">
+          <h1>Minhas fases</h1>
+          <p id="mm-msg" class="lead" role="status"></p>
+          <div class="sel-row"><button id="mm-new" class="btn">✏ Nova fase</button><button id="mm-import" class="btn btn-ghost">📥 Importar fase</button></div>
+          <div id="mm-list"></div>
+          <p class="notes">As fases ficam só neste aparelho (armazenamento do navegador). Compartilhar o código não publica a fase em nenhum catálogo online.</p>
+          <button id="mm-back" class="btn btn-ghost">Voltar ao menu</button>
+        </div>
+      </div>
+      <div id="backup" class="ed-panel hidden">
+        <div class="panel panel-wide" id="bk-body"></div>
+      </div>
+      <div id="importer" class="ed-panel hidden">
+        <div class="panel panel-wide">
+          <h1>Importar fase</h1>
+          <p class="lead">Cole o código de uma fase (começa com <b>DSPF1:</b>). O código é tratado só como dados.</p>
+          <textarea id="im-text" rows="5" spellcheck="false" autocomplete="off" aria-label="Código da fase" placeholder="DSPF1:…"></textarea>
+          <p id="im-msg" role="alert"></p>
+          <div id="im-preview" class="hidden"><canvas id="im-canvas" width="320" height="200"></canvas><div id="im-name"></div><div id="im-state" class="notes"></div></div>
+          <div class="ov-actions">
+            <button id="im-check" class="btn">Verificar código</button>
+            <button id="im-ok" class="btn hidden">Importar como nova fase</button>
+            <button id="im-back" class="btn btn-ghost">Voltar</button>
+          </div>
+          <p class="notes">A fase importada vira uma cópia nova: nunca sobrescreve as suas fases. Compartilhar o código não publica a fase em um catálogo online.</p>
+        </div>
+      </div>
+      <div id="missions" class="hidden">
+        <div class="panel panel-wide">
+          <h1>Missões</h1>
+          <p id="mis-info" class="lead"></p>
+          <div id="mis-filter" role="radiogroup" aria-label="Filtrar por tipo"></div>
+          <div id="mis-grid"></div>
+          <p class="notes">Missões não alteram moedas, medalhas nem recordes da campanha. Concluir em qualquer tempo vale; em 10 s você ganha também o selo "Desafio original".</p>
+          <button id="mis-back" class="btn btn-ghost">Voltar</button>
+        </div>
+      </div>
+      <div id="charsel" class="hidden">
+        <div class="panel panel-wide">
+          <h1>Personagem</h1>
+          <canvas id="char-big" width="192" height="192" aria-label="Prévia animada da skin"></canvas>
+          <div id="char-pose" class="char-pose"></div>
+          <div id="char-name" class="char-name"></div>
+          <p id="char-desc"></p>
+          <p id="char-req"></p>
+          <span class="bar big" id="char-bar-wrap"><i id="char-bar"></i></span>
+          <button id="char-equip" class="btn">Equipar</button>
+          <div id="char-list" role="radiogroup" aria-label="Escolha a skin"></div>
+          <p class="notes">Skins são só visuais: a área de colisão e a velocidade são as mesmas. Elas usam conquistas já registradas; nada é gasto.</p>
+          <button id="char-back" class="btn btn-ghost">Voltar</button>
+        </div>
+      </div>
+      <div id="timesel" class="hidden">
+        <div class="panel panel-wide">
+          <h1>Tempo por sala</h1>
+          <p class="lead"><b>Este tempo vale para cada tentativa de uma sala.</b></p>
+          <fieldset id="time-opts" class="opts"><legend class="sr">Escolha o tempo por sala</legend></fieldset>
+          <div id="time-custom-row" class="hidden">
+            <label class="row"><span>Segundos (5 a 300)</span> <input type="number" id="time-custom" min="5" max="300" step="1" inputmode="numeric" aria-describedby="time-err"></label>
+          </div>
+          <p id="time-err" role="alert"></p>
+          <div class="notes" id="time-notes">
+            <p><b>10 segundos</b> é o desafio original. Tempos <b>abaixo de 10 s</b> são desafios extras e podem tornar algumas fases impossíveis.</p>
+            <p>Fases desbloqueadas, moedas e as medalhas de conclusão valem em <b>qualquer</b> tempo. A medalha de <b>tempo-alvo (⏱)</b> só vale no modo original de 10 s.</p>
+            <p>Os melhores tempos são guardados <b>separadamente</b> para cada opção (inclusive "Sem limite"). Os recordes antigos ficam no modo de 10 s.</p>
+            <p id="time-pause-note" class="hidden"><b>Atenção:</b> mudar o tempo durante a pausa reinicia a sala; você confirma antes.</p>
+          </div>
+          <div class="ov-actions">
+            <button id="time-ok" class="btn">Continuar</button>
+            <button id="time-back" class="btn btn-ghost">Voltar</button>
+          </div>
+        </div>
+      </div>
+      <div id="select" class="hidden">
+        <div class="panel panel-wide">
+          <h1>Fases</h1>
+          <div class="sel-row"><button id="sel-time" class="btn btn-ghost sel-time"></button><button id="sel-char" class="btn btn-ghost sel-time">🧑‍🚀 Personagem</button></div>
+          <div id="level-grid"></div>
+          <p id="sel-info"></p>
+          <button id="sel-back" class="btn btn-ghost">Voltar ao menu</button>
+        </div>
+      </div>
+    </main>
+
+    <footer id="controls">
+      <div id="dpad">
+        <button class="dir up" data-dx="0" data-dy="-1" aria-label="Cima">▲</button>
+        <button class="dir left" data-dx="-1" data-dy="0" aria-label="Esquerda">◀</button>
+        <button class="dir right" data-dx="1" data-dy="0" aria-label="Direita">▶</button>
+        <button class="dir down" data-dx="0" data-dy="1" aria-label="Baixo">▼</button>
+      </div>
+      <div id="side-btns">
+        <button id="btn-dash" class="btn dash-touch" aria-label="Impulso (Espaço)">⚡<small>Impulso</small></button>
+        <button id="btn-retry-touch" class="btn retry-touch" aria-label="Reiniciar (R)">↻<small>Reiniciar</small></button>
+      </div>
+    </footer>
+  </div>
+
+  <script src="levels.js"></script>
+  <script src="missions.js"></script>
+  <script src="mapkit.js"></script>
+  <script src="engine.js"></script>
+  <script src="audio.js"></script>
+  <script src="game.js"></script>
+  <script src="editor.js"></script>
+  <script src="backup.js"></script>
+  <script src="coop.js"></script>
+</body>
+</html>
