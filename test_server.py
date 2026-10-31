@@ -80,7 +80,7 @@ async def duo_room(level_mid="duo-1", limit=60):
 
 async def main():
     here = os.path.dirname(os.path.abspath(__file__))
-    env = dict(os.environ, PORT=str(PORT), HOST="127.0.0.1")
+    env = dict(os.environ, PORT=str(PORT), HOST="127.0.0.1", REQUIRE_BUILD="0")
     srv = subprocess.Popen([sys.executable, "server.py"], cwd=here, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     try:
         for _ in range(50):

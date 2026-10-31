@@ -13,6 +13,7 @@ Nada é gravado em disco. Salas vivem na memória e somem quando todos saem.
 """
 import asyncio
 import collections
+import hashlib
 import base64
 import hashlib
 import json
@@ -46,6 +47,8 @@ DIRS = [(0.0, 0.0), (1.0, 0.0), (_D, _D), (0.0, 1.0), (-_D, _D), (-1.0, 0.0), (-
 CMD_QUEUE_MAX = 8            # comandos de movimento aguardando (cada um vale 1/60 s); passar disso descarta os mais antigos
 DEFAULT_LIMIT = 25           # segundos por tentativa (o anfitrião muda no lobby: 5 a 300)
 LIMIT_MIN, LIMIT_MAX = 5, 300
+BUILD = "2026-11-01-r1"       # versão do cliente/servidor: mudou aqui => mudou em coop.js (BUILD). Clientes com página antiga são avisados.
+REQUIRE_BUILD = os.environ.get("REQUIRE_BUILD", "1") == "1"    # os testes automáticos desligam (os robôs não têm "página")
 SIZES = (2, 3)               # modalidades: Dupla (2) e Trio (3)
 MODALITY = {2: "Dupla — 2 jogadores", 3: "Trio — 3 jogadores"}
 EXP_STEPS = 6
@@ -185,6 +188,22 @@ def clean_name(s):
     return s or "Jogador"
 
 
+_MVER = {}
+
+
+def map_version(lv):
+    """Versão curta do conteúdo do mapa (muda se qualquer parede, porta, perigo ou parâmetro mudar)."""
+    k = lv["mid"]
+    if k not in _MVER:
+        _MVER[k] = hashlib.sha1(json.dumps(public(lv), sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:8]
+    return _MVER[k]
+
+
+def ent_counts(lv):
+    """Quantidade de entidades do mapa por tipo: o servidor diz, cada navegador confere o que recebeu e desenhou."""
+    return {k: len(lv.get(k) or []) for k in ("walls", "plates", "gates", "spikes", "lasers", "saws", "drones", "portals")}
+
+
 class Slot:
     def __init__(self, idx, name, conn):
         self.idx, self.name, self.conn = idx, name, conn
@@ -192,6 +211,10 @@ class Slot:
         self.skin = "explorer"
         self.ready = False          # "estou pronto" no lobby
         self.loaded = False         # já carregou a fase atual (só vale durante a espera)
+        self.build = None           # versão da página do jogador (None = página antiga, que não informa)
+        self.ent_bad = 0            # confirmações de carga com entidades diferentes das do servidor
+        self.fp = None              # impressão digital do estado do navegador (só com o diagnóstico ligado)
+        self.fp_t = 0.0
         self.token = secrets.token_urlsafe(12)
         self.dropped = None          # instante da queda (None = conectado)
         self.inp = (0.0, 0.0)
@@ -299,6 +322,8 @@ class Room:
         self.exp = None           # Exp da modalidade e do tempo atuais
         self.transit = None       # tela de resultado entre fases da expedição (aguardando "pronto para continuar")
         self.rid = 0
+        self.gid = 0              # número desta partida/fase (muda a cada start_game): mensagens de outra partida são ignoradas
+        self.snapn = 0
         self.phase = "lobby"      # lobby | playing
         self.sim = None
         self.task = None
@@ -325,10 +350,10 @@ class Room:
     def state(self):
         return {
             "t": "room", "code": self.code, "host": self.host, "size": self.size, "modality": MODALITY[self.size], "limit": self.limit, "level": self.level,
-            "mode": self.mode, "exp": self.exp.pub() if self.exp else None, "maps": maps_for(self.size, self.difficulty), "difficulty": self.difficulty, "diff_name": DIFF_NAMES[self.difficulty], "chapter": self.chapter,
+            "build": BUILD, "mode": self.mode, "exp": self.exp.pub() if self.exp else None, "maps": maps_for(self.size, self.difficulty), "difficulty": self.difficulty, "diff_name": DIFF_NAMES[self.difficulty], "chapter": self.chapter,
             "transit": ({"rid": self.transit["rid"], "c": sorted(self.transit["confirmed"]), "final": self.transit["final"]} if self.transit else None),
             "phase": self.phase, "paused": self.paused,
-            "players": [None if s is None else {"name": s.name, "roles": s.roles, "skin": s.skin, "ready": s.ready, "on": bool(s.conn and s.conn.alive)} for s in self.slots],
+            "players": [None if s is None else {"name": s.name, "roles": s.roles, "skin": s.skin, "ready": s.ready, "stale": bool(REQUIRE_BUILD and s.build != BUILD), "on": bool(s.conn and s.conn.alive)} for s in self.slots],
         }
 
     def push_state(self):
@@ -370,6 +395,9 @@ class Room:
         need = f"{self.size} jogadores"
         if any(x is None or not (x.conn and x.conn.alive) for x in ss):
             return f"{MODALITY[self.size]}: precisamos de exatamente {need} conectados."
+        old = [x.name for x in ss if REQUIRE_BUILD and x.build != BUILD]
+        if old:
+            return f"A página de {', '.join(old)} está desatualizada (versão diferente do servidor): recarregue com ⌘⇧R (Ctrl+Shift+R) antes de começar, senão elementos podem não aparecer."
         idx = self.target()
         if idx is None:
             if self.mode == "exp" and self.exp and not self.exp.available_():
@@ -416,13 +444,21 @@ class Room:
         for s in self.slots:
             if s:
                 s.inp, s.inp_t = (0.0, 0.0), 0.0
-        lv_pub = dict(public(lv), time=self.limit)    # o tempo mostrado é o da sala, não o da fase
-        self.broadcast({"t": "level", "level": lv_pub, "n": self.level, "total": len(LEVELS), "roles": [s.roles for s in self.slots[:self.size]], "size": self.size, "limit": self.limit,
-                        "exp": ({"step": self.exp.step + 1, "total": EXP_STEPS, "id": self.exp.seq["id"], "chapter": self.exp.chap, "title": self.exp.seq["title"], "diff": self.exp.diff} if self.mode == "exp" and self.exp else None), "diff": lv["diff"], "difficulty": self.difficulty})
+        self.gid += 1; self.snapn = 0
+        self.broadcast(self.level_msg())
         self.push_state()
         if self.task:
             self.task.cancel()
         self.task = asyncio.ensure_future(self.run())
+
+    def level_msg(self, resync=False):
+        """Estado COMPLETO e idêntico da fase para todos: mapa, versão, modalidade, dificuldade, número da partida (gid) e quantidade de
+        cada tipo de entidade. Não depende de eventos anteriores: serve também para reenviar a quem perdeu algo (resync)."""
+        lv = LEVELS[self.level]
+        lv_pub = dict(public(lv), time=self.limit)    # o tempo mostrado é o da sala, não o da fase
+        return {"t": "level", "level": lv_pub, "n": self.level, "total": len(LEVELS), "roles": [s.roles for s in self.slots[:self.size]], "size": self.size, "limit": self.limit,
+                "exp": ({"step": self.exp.step + 1, "total": EXP_STEPS, "id": self.exp.seq["id"], "chapter": self.exp.chap, "title": self.exp.seq["title"], "diff": self.exp.diff} if self.mode == "exp" and self.exp else None),
+                "diff": lv["diff"], "difficulty": self.difficulty, "gid": self.gid, "build": BUILD, "mver": map_version(lv), "mid": lv["mid"], "ent": ent_counts(lv), "resync": resync}
 
     def advance(self):
         """Mapa avulso: depois da vitória segue para o próximo mapa da MESMA modalidade (ou encerra). A expedição usa a tela de resultado."""
@@ -494,6 +530,10 @@ class Room:
         now = time.monotonic()
         m["st"] = round(now, 3)
         m["ak"] = [(x.ack if x else 0) for x in self.slots[:self.size]]
+        m["gd"] = self.gid
+        self.snapn += 1
+        if self.snapn % 30 == 1:                       # a cada ~1 s: contagem de entidades (cada navegador confere o que tem e o que desenhou)
+            m["ent"] = ent_counts(LEVELS[self.level])
         if sim.phase == "play":
             m["en"] = round(now + max(0.0, sim.limit - sim.t), 3)
         if sim.phase == "wait":
@@ -574,7 +614,7 @@ class Room:
                         self.exp.cur_defeats += 1; self.exp.defeats += 1; self.exp.active += sim.t
                     # cada evento leva o número da tentativa e um contador: quem recebe atrasado/repetido descarta
                     self.evn += 1
-                    self.broadcast({"t": "ev", "a": ev[1] if ev[0] == "start" else sim.attempt, "i": self.evn, "e": list(ev)})
+                    self.broadcast({"t": "ev", "a": ev[1] if ev[0] == "start" else sim.attempt, "i": self.evn, "g": self.gid, "e": list(ev)})
                 sim.events.clear()
                 n += 1
                 if n % 2 == 0 or sim.phase != before or had_ev:      # evento (placa/porta/chave): quadro na hora, sem esperar o próximo ciclo
@@ -615,6 +655,16 @@ def attach(conn, room, idx):
     s.conn, s.dropped = conn, None
 
 
+def now_ok(conn, key, gap):
+    """limita a frequência de mensagens auxiliares por conexão"""
+    d = conn.__dict__.setdefault("_gaps", {})
+    t = time.monotonic()
+    if t - d.get(key, 0.0) < gap:
+        return False
+    d[key] = t
+    return True
+
+
 def handle(conn, m):
     t = m.get("t")
     room = conn.room
@@ -633,6 +683,7 @@ def handle(conn, m):
         room.new_exp()
         room.slots[0] = Slot(0, clean_name(m.get("name")), conn)
         room.slots[0].skin = clean_skin(m.get("skin"))
+        room.slots[0].build = str(m.get("build"))[:24] if m.get("build") is not None else None
         attach(conn, room, 0)
         room.host = 0
         conn.send({"t": "joined", "code": code, "you": 0, "token": room.slots[0].token})
@@ -653,6 +704,7 @@ def handle(conn, m):
             return err(conn, f"A sala está cheia ({r.size} jogador{'es' if r.size > 1 else ''}).")
         r.slots[i] = Slot(i, clean_name(m.get("name")), conn)
         r.slots[i].skin = clean_skin(m.get("skin"))
+        r.slots[i].build = str(m.get("build"))[:24] if m.get("build") is not None else None
         attach(conn, r, i)
         conn.send({"t": "joined", "code": code, "you": i, "token": r.slots[i].token})
         r.reassign_host()
@@ -673,7 +725,7 @@ def handle(conn, m):
             old.close()
         conn.send({"t": "joined", "code": r.code, "you": idx, "token": r.slots[idx].token, "back": True})
         if r.phase == "playing" and r.sim:
-            conn.send({"t": "level", "level": public(LEVELS[r.level]), "n": r.level, "exp": ({"step": r.exp.step + 1, "total": EXP_STEPS, "id": r.exp.seq["id"], "chapter": r.exp.chap, "title": r.exp.seq["title"], "diff": r.exp.diff} if r.mode == "exp" and r.exp else None), "total": len(LEVELS), "roles": [s.roles for s in r.slots[:r.size]], "size": r.size})
+            conn.send(r.level_msg(resync=True))
             if all(s and s.conn and s.conn.alive for s in r.slots[:r.size]):
                 r.paused = False
                 r.sim.resume_count(2.0)
@@ -722,7 +774,28 @@ def handle(conn, m):
         room.push_state()
     elif t == "loaded":
         if room.phase == "playing" and room.sim and room.sim.phase == "wait":
+            g = m.get("g")
+            if g is not None and g != room.gid:
+                return                                   # confirmação de uma partida/fase anterior: ignora
+            ent = m.get("ent")
+            if ent is not None and ent != ent_counts(LEVELS[room.level]):
+                # o navegador preparou entidades diferentes das do servidor: reenvia o estado completo; se persistir, não começa
+                me.ent_bad += 1
+                log("carga com entidades diferentes", me.name, ent)
+                if me.ent_bad == 1:
+                    conn.send(room.level_msg(resync=True))
+                    return
+                return room.stop_game(f"O navegador de {me.name} não preparou a fase igual à do servidor. Recarregue a página (⌘⇧R) e tentem de novo.")
             me.loaded = True
+    elif t == "resync":
+        if room.phase == "playing" and room.sim and conn.slot is not None and now_ok(conn, "resync", 2.0):
+            conn.send(room.level_msg(resync=True))
+            conn.send(room.snap())
+    elif t == "fp":
+        f = m.get("f")
+        if isinstance(f, str) and now_ok(conn, "fp", 1.0):
+            me.fp = f[:240]
+            room.broadcast({"t": "fps", "l": [(x.fp if x else None) for x in room.slots[:room.size]], "n": [(x.name if x else None) for x in room.slots[:room.size]]})
     elif t == "mark":
         now = time.monotonic()
         if room.phase != "playing" or not room.sim or now - conn.last_mark < MARK_GAP:
@@ -928,7 +1001,7 @@ def handle(conn, m):
                 room.exp.active += room.sim.t
             room.sim.reset()
             room.evn += 1
-            room.broadcast({"t": "ev", "a": room.sim.attempt, "i": room.evn, "e": ["rs", conn.slot]})     # aviso visível para o grupo
+            room.broadcast({"t": "ev", "a": room.sim.attempt, "i": room.evn, "g": room.gid, "e": ["rs", conn.slot]})     # aviso visível para o grupo
             room.broadcast(room.snap())
     elif t == "next":
         if conn.slot == room.host and room.phase == "playing" and room.sim and room.sim.phase == "won" and room.mode == "free":
@@ -1083,7 +1156,7 @@ async def ws_session(reader, writer, hdr, ip):
                   f"Sec-WebSocket-Accept: {acc}\r\n\r\n").encode())
     conn = Conn(reader, writer, ip)
     conns.add(conn)
-    conn.send({"t": "hi", "v": 2, "levels": catalog(), "roles": ROLES, "seqs": sequences(), "modalities": {str(k): v for k, v in MODALITY.items()}})
+    conn.send({"t": "hi", "v": 3, "build": BUILD, "levels": catalog(), "roles": ROLES, "seqs": sequences(), "modalities": {str(k): v for k, v in MODALITY.items()}})
     try:
         while conn.alive:
             op, payload = await ws_read(reader)

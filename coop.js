@@ -31,7 +31,9 @@
   const _D = 0.7071067811865476;
   const DIRS = [[0, 0], [1, 0], [_D, _D], [0, 1], [-_D, _D], [-1, 0], [-_D, -_D], [0, -1], [_D, -_D]];   // 0 parado, 1..8: E SE S SW W NW N NE
   // medições reais do painel de diagnóstico (nada aqui é estimado)
-  const D = { on: false, frames: [], rtts: [], snapT: [], rxB: [], cmdMsg: [], cmdN: [], corr: [], stale: 0, dup: 0, lastCorr: 0, worst: 0 };
+  const D = { resyncs: 0, lastResync: "", mismatch: 0, snapAt: 0, evAt: 0, on: false, frames: [], rtts: [], snapT: [], rxB: [], cmdMsg: [], cmdN: [], corr: [], stale: 0, dup: 0, lastCorr: 0, worst: 0 };
+  const BUILD = "2026-11-01-r1";   // versão desta página (o servidor confere: página antiga = elementos que podem não aparecer)
+  const ENT_KEYS = ["walls", "plates", "gates", "spikes", "lasers", "saws", "drones", "portals"];
   const PRESETS = [10, 15, 20, 25, 30, 45, 60];
   const MARKS = [["📍", "Aqui!"], ["🆘", "Preciso de ajuda!"], ["🚪", "Vá para a saída!"]];
   const EMOS = [["👍", "Beleza!"], ["✋", "Espera!"], ["👉", "Vem aqui!"], ["⚠️", "Cuidado!"], ["🔑", "Pega a chave!"], ["🆘", "Preciso de ajuda!"]];
@@ -159,7 +161,7 @@
     try {
       if (!C.ws || C.ws.readyState !== 1) { C.url = url; C.closing = false; await openSocket(url); }
       const skin = mySkin();
-      send(kind === "create" ? { t: "create", name, skin } : { t: "join", code, name, skin });
+      send(kind === "create" ? { t: "create", name, skin, build: BUILD } : { t: "join", code, name, skin, build: BUILD });
     } catch (e) { banner(e.message, "bad"); setBusy(false); }
   }
   function mySkin() { try { return API.equippedSkin ? API.equippedSkin() : "explorer"; } catch (e) { return "explorer"; } }
@@ -199,20 +201,28 @@
         setBusy(false); banner(m.back ? "Você voltou para a sala!" : "", "good", 2500);
         if (!C.room || C.view === "connect") showView("lobby");
         break;
-      case "room": C.room = m; renderLobby(); updateChips(); updatePaused(); if (C.resultMsg) renderResult(); break;
-      case "level":
-        hideResult(); C.expInfo = m.exp || null;
-        C.level = m.level; C.total = m.total; C.roles = m.roles; C.snap = null; C.pr = null; C.hist = []; C.outbox = []; C.ring = []; C.lastI = 0; C.result = null; C.att = 0; C.shown = [null, null, null]; C.pose = [null, null, null]; C.wonAt = 0; C.emos = []; C.marks = []; C.armed = -1; C.lastCount = -1;
-        buildChips(); showView("game"); sfx("blip");
-        // a fase está pronta neste navegador: avisa o servidor (a contagem só começa quando TODOS avisarem)
-        { let sent = false; const ok = () => { if (!sent) { sent = true; send({ t: "loaded" }); } };
-          requestAnimationFrame(() => requestAnimationFrame(ok)); setTimeout(ok, 600); }   // se a aba estiver em segundo plano o rAF não roda: o aviso sai mesmo assim
+      case "room": C.room = m; if (m.build && m.build !== BUILD && !C.warnedBuild) { C.warnedBuild = true; banner("Sua página está desatualizada em relação ao servidor. Recarregue com ⌘⇧R (Ctrl+Shift+R) para ver todos os elementos.", "bad", 12000); } renderLobby(); updateChips(); updatePaused(); if (C.resultMsg) renderResult(); break;
+      case "level": {
+        // Estado COMPLETO da fase (mapa + versão + entidades + número da partida). Um reenvio (resync) só troca o cenário, sem reiniciar nada.
+        const same = m.resync && C.gid === m.gid && C.snap;
+        C.gid = m.gid; C.lvAt = performance.now(); C.mver = m.mver; C.entSrv = m.ent || null; C.srvBuild = m.build || null;
+        C.level = m.level; C.roles = m.roles; C.total = m.total;
+        if (!same) {
+          hideResult(); C.expInfo = m.exp || null;
+          C.snap = null; C.pr = null; C.hist = []; C.outbox = []; C.ring = []; C.lastI = 0; C.result = null; C.att = 0; C.shown = [null, null, null]; C.pose = [null, null, null]; C.wonAt = 0; C.emos = []; C.marks = []; C.armed = -1; C.lastCount = -1;
+          buildChips(); showView("game"); sfx("blip");
+        }
+        // a fase está pronta neste navegador: confirma QUAL partida e QUANTAS entidades preparou (a contagem só começa quando TODOS confirmarem igual)
+        { let sent = false; const ok = () => { if (!sent) { sent = true; send({ t: "loaded", g: m.gid, ent: entCounts(m.level) }); } };
+          requestAnimationFrame(() => requestAnimationFrame(ok)); setTimeout(ok, 600); }   // aba em segundo plano: o rAF não roda, o aviso sai mesmo assim
         break;
+      }
       case "s": onSnap(m); break;
       case "notice": banner(m.msg, "info", 9000); break;
+      case "fps": C.fpsMsg = m; break;
       case "ckpt": try { saveCkpt(m); } catch (e) {} break;
       case "result": C.resultMsg = m; C.contSent = null; renderResult(); sfx("win"); break;
-      case "ev": if (m.i != null) { if (m.i <= C.lastI) { D.dup++; break; } C.lastI = m.i; } if (m.a != null && m.a < C.att) { D.stale++; break; } if (m.a > C.att) C.att = m.a; onEvent(m.e); break;   // evento atrasado de tentativa anterior é descartado
+      case "ev": if (m.g != null && C.gid != null && m.g !== C.gid) { D.stale++; break; } D.evAt = performance.now(); if (m.i != null) { if (m.i <= C.lastI) { D.dup++; break; } C.lastI = m.i; } if (m.a != null && m.a < C.att) { D.stale++; break; } if (m.a > C.att) C.att = m.a; onEvent(m.e); break;   // evento atrasado de tentativa anterior é descartado
       case "mark": C.marks.push({ s: m.s, k: m.k, x: m.x, y: m.y, until: performance.now() + 5000 }); sfx("blip"); break;
       case "stopped": hideResult(); C.expInfo = null; C.level = null; C.snap = null; C.result = null; C.marks = []; C.armed = -1; if (C.view === "game") showView("lobby"); renderLobby(); banner(m.why || "", m.why && m.why.includes("zeraram") ? "good" : "bad", 9000); break;
       case "emo": C.emos.push({ s: m.s, k: m.k, until: performance.now() + 2500 }); sfx("blip"); break;
@@ -224,7 +234,13 @@
     }
   }
   function onSnap(m) {
+    if (m.gd != null && C.gid != null && m.gd !== C.gid) { D.stale++; return; }   // quadro de OUTRA partida/fase
     if (m.a < C.att) return;                       // quadro atrasado de uma tentativa anterior
+    D.snapAt = performance.now();
+    if (m.ent && C.level) {                        // conferência a cada ~1 s: o que o servidor diz × o que recebi × o que desenhei
+      const have = entCounts(C.level);
+      if (!sameEnt(m.ent, have) || (C.drawn && !sameEnt(m.ent, C.drawn) && performance.now() - (C.lvAt || 0) > 2500)) { D.mismatch++; requestResync("contagem difere do servidor"); }
+    }
     const prev = C.snap;
     if (m.st != null) {                            // relógio do servidor: guarda a melhor estimativa (menor atraso)
       const off = m.st - performance.now() / 1000;
@@ -262,6 +278,12 @@
     const cn = D.cmdN.reduce((a, x) => a + x[1], 0), cs = D.cmdN.length > 1 ? (cn / ((D.cmdN[D.cmdN.length - 1][0] - D.cmdN[0][0]) / 1000)).toFixed(0) : "0";
     const cc = D.corr.length, cmean = cc ? (D.corr.reduce((a, x) => a + x[1], 0) / cc).toFixed(1) : "0", cmax = cc ? Math.max(...D.corr.map((x) => x[1])).toFixed(1) : "0";
     const buf = C.ring.length > 1 && C.off != null ? Math.max(0, C.ring[C.ring.length - 1].st - (now / 1000 + C.off - INTERP)) * 1000 : null;
+    const lvl_ = C.level || {}, srv = C.entSrv || {}, rec = entCounts(C.level), drw = C.drawn || {};
+    const entLine = ENT_KEYS.map((k) => `${k.slice(0, 4)} ${srv[k] == null ? "?" : srv[k]}/${rec[k]}/${drw[k] == null ? "?" : drw[k]}`).join("  ");
+    const ago = (t) => (t ? Math.round(now - t) + " ms" : "—");
+    const myfp = fingerprint();
+    const others = (C.fpsMsg && C.fpsMsg.l ? C.fpsMsg.l : []).map((f, i) => (f ? `${(C.fpsMsg.n && C.fpsMsg.n[i]) || "J" + (i + 1)}: ${f === myfp ? "igual ao meu" : "DIFERENTE → " + f}` : null)).filter(Boolean);
+    if (now - (C.fpSent || 0) > 3000) { C.fpSent = now; send({ t: "fp", f: myfp }); }
     diagEl.textContent = [
       "DIAGNÓSTICO (medido)",
       `FPS: ${fps}   pior quadro: ${worst}`,
@@ -270,8 +292,14 @@
       `lotes de comando/s: ${cm}   comandos/s: ${cs}`,
       `correções do boneco local (10 s): ${cc}  média ${cmean} u  máx ${cmax} u  última ${D.lastCorr.toFixed(1)} u`,
       `comandos a caminho: ${C.hist.length}   buffer de interpolação: ${buf == null ? "—" : buf.toFixed(0) + " ms"}`,
-      `eventos descartados: ${D.stale} antigos, ${D.dup} repetidos`,
-    ].join("\n");
+      `eventos descartados: ${D.stale} antigos/de outra partida, ${D.dup} repetidos`,
+      "— estado da partida —",
+      `mapa: ${lvl_.mid || "—"} v${C.mver || "—"} · partida ${C.gid || "—"} · tentativa ${C.att || "—"}`,
+      `sala: ${(C.room && C.room.modality) || "—"} · ${lvl_.diff ? DIFF[lvl_.diff] : "—"} · ${(C.room && C.room.limit) || "—"} s · página ${BUILD}${C.srvBuild && C.srvBuild !== BUILD ? " ≠ servidor " + C.srvBuild : ""}`,
+      `entidades servidor/recebido/desenhado: ${entLine}`,
+      `último quadro há ${ago(D.snapAt)} · último evento há ${ago(D.evAt)} · ressincronizações: ${D.resyncs}${D.lastResync ? " (" + D.lastResync + ")" : ""} · divergências: ${D.mismatch} · erros de desenho: ${D.drawErrs || 0}${D.lastDrawErr ? " (" + D.lastDrawErr + ")" : ""}`,
+      "eu: " + myfp,
+    ].concat(others).join("\n");
   }
   /* ------------------------------------------------------------------ previsão do boneco local */
   // O servidor continua sendo a autoridade (colisões, placas, portas, morte, vitória, tempo). Aqui só se PREVÊ o movimento do
@@ -418,6 +446,20 @@
     lsSet(LS_REC, JSON.stringify(all));
     C.lastRec = { mid, time, prev, isNew, key: k };
   }
+  /** Um erro ao desenhar UM tipo de elemento não pode esconder os demais: registra, mostra no diagnóstico e avisa o servidor (1 vez por tipo). */
+  function drawFail(what, e) {
+    D.drawErrs = (D.drawErrs || 0) + 1; D.lastDrawErr = what + ": " + String(e && e.message || e).slice(0, 60);
+    try { ctx.restore(); ctx.restore(); } catch (x) {}
+    C.reported = C.reported || {}; if (!C.reported[what]) { C.reported[what] = 1; send({ t: "cerr", m: "desenho de " + what + ": " + String(e && e.message || e).slice(0, 100), ua: navigator.userAgent.slice(0, 80) }); }
+  }
+  function entCounts(lv) { const o = {}; ENT_KEYS.forEach((k) => { o[k] = (lv && lv[k] ? lv[k].length : 0); }); return o; }
+  const sameEnt = (a, b) => !!a && !!b && ENT_KEYS.every((k) => a[k] === b[k]);
+  function requestResync(why) { const now = performance.now(); if (now - (C.resyncAt || 0) < 3000) return; C.resyncAt = now; D.resyncs++; D.lastResync = why; send({ t: "resync" }); }
+  /** Impressão digital do que ESTE navegador tem e desenhou: dá para comparar entre jogadores no painel de diagnóstico. */
+  function fingerprint() {
+    const c = C.drawn || {}, l = C.level || {};
+    return `${l.mid || "-"}@${C.mver || "-"}|g${C.gid || 0}|a${C.att || 0}|${(C.room && C.room.size) || "?"}j|${l.diff || "-"}|` + ENT_KEYS.map((k) => `${k.slice(0, 2)}${c[k] == null ? "?" : c[k]}`).join("");
+  }
   function nP() { return C.roles && C.roles.length ? C.roles.length : 3; }
   function onEvent(e) {
     const k = e[0];
@@ -528,6 +570,7 @@
     const missing = seated.filter((p) => !p).length;
     if (missing) why = `${MOD[size]}: faltam ${missing} jogador${missing > 1 ? "es" : ""} (a partida exige exatamente ${size}). Mande o código ${r.code}.`;
     else if (seated.some((p) => !p.on)) why = "Um jogador está desconectado.";
+    else if (seated.some((p) => p.stale)) why = `A página de ${seated.filter((p) => p.stale).map((p) => p.name).join(", ")} está desatualizada: recarregar com ⌘⇧R antes de começar.`;
     else if (targetOf(r) == null) why = r.mode === "exp" ? "Essa expedição já terminou: recomece do início." : "Escolha um mapa ou a Expedição.";
     else if (!isFixed(lvl(targetOf(r))) && seated.some((p) => (p.roles || []).length !== 1)) why = "Cada jogador precisa escolher 1 poder (🔥 💧 🌿).";
     else if (seated.some((p) => !p.ready)) why = `Aguardando ficar pronto: ${seated.filter((p) => !p.ready).map((p) => p.name).join(", ")}.`;
@@ -803,6 +846,7 @@
 
   function draw(now, dt) {
     const lv = C.level, s = C.snap;
+    const dc = { walls: 0, plates: 0, gates: 0, spikes: 0, lasers: 0, saws: 0, drones: 0, portals: 0 };   // o que ESTE navegador realmente desenhou neste quadro
     if (!lv || !cv.width) return;
     ctx.setTransform(scale * dpr, 0, 0, scale * dpr, 0, 0);
     ctx.fillStyle = "#0b0a1c"; ctx.fillRect(0, 0, W, H);
@@ -829,9 +873,10 @@
     });
     // paredes
     ctx.fillStyle = "#26225e"; ctx.strokeStyle = "#5a54c0"; ctx.lineWidth = 2;
-    for (const w of lv.walls) { ctx.fillRect(w[0], w[1], w[2], w[3]); ctx.strokeRect(w[0] + 1, w[1] + 1, w[2] - 2, w[3] - 2); }
+    for (const w of lv.walls) { dc.walls++; ctx.fillRect(w[0], w[1], w[2], w[3]); ctx.strokeRect(w[0] + 1, w[1] + 1, w[2] - 2, w[3] - 2); }
     // espinhos
     for (const sp of lv.spikes) {
+      dc.spikes++;
       ctx.fillStyle = "rgba(255,45,85,.14)"; ctx.fillRect(sp[0], sp[1], sp[2], sp[3]);
       ctx.strokeStyle = "rgba(255,45,85,.7)"; ctx.lineWidth = 2; ctx.setLineDash([6, 4]); ctx.strokeRect(sp[0] - 1, sp[1] - 1, sp[2] + 2, sp[3] + 2); ctx.setLineDash([]);
       glow("#ff2d55", 8); ctx.fillStyle = "#ff2d55"; ctx.beginPath();
@@ -843,6 +888,7 @@
     }
     // portas
     lv.gates.forEach((g, gi) => {
+      dc.gates++;
       const open = s && s.g[gi] === 1, r = g.r, c = GATE_COL[gi % GATE_COL.length];
       if (open) { ctx.strokeStyle = c; ctx.globalAlpha = 0.5; ctx.lineWidth = 2; ctx.setLineDash([5, 5]); ctx.strokeRect(r[0] + 1, r[1] + 1, r[2] - 2, r[3] - 2); ctx.setLineDash([]); ctx.globalAlpha = 1; }
       else {
@@ -856,6 +902,7 @@
     // INTERRUPTOR (redondo, ◉: depois de acionado a porta fica aberta até o fim da tentativa).
     // Cada um leva a cor e o símbolo da porta que controla.
     lv.plates.forEach((p, pi) => {
+      dc.plates++;
       const gi = lv.gates.findIndex((g) => g.plates.includes(pi)), gg = Math.max(0, gi), c = GATE_COL[gg % GATE_COL.length], sym = GATE_SYM[gg % GATE_SYM.length], on = s && s.pl[pi] === 1;
       ctx.save(); ctx.translate(p.x, p.y);
       glow(c, on ? 16 : 0);
@@ -875,6 +922,7 @@
     });
     // lasers
     for (const l of lv.lasers) {
+      dc.lasers++;
       const st = s && s.ph === "play" ? laserState(l, t) : s && s.ph === "count" ? 0 : laserState(l, t);
       const r = l.r, horiz = r[2] >= r[3];
       const ax = horiz ? r[0] : r[0] + r[2] / 2, ay = horiz ? r[1] + r[3] / 2 : r[1], bx = horiz ? r[0] + r[2] : ax, by = horiz ? ay : r[1] + r[3];
@@ -887,14 +935,17 @@
     }
     // serras
     for (const m of lv.saws) {
+      dc.saws++;
       const p = sawPos(m, t);
       ctx.save(); ctx.translate(p[0], p[1]); ctx.rotate(RM() ? 0 : now / 160 + m.x1);
       glow("#ff3df2", 10); ctx.fillStyle = "#ff3df2"; ctx.beginPath();
       for (let i = 0; i < 20; i++) { const a = (i / 20) * Math.PI * 2, rr = i % 2 ? m.r * 0.78 : m.r + 2; ctx.lineTo(Math.cos(a) * rr, Math.sin(a) * rr); }
       ctx.closePath(); ctx.fill(); noGlow(); ctx.fillStyle = "#1a0830"; ctx.beginPath(); ctx.arc(0, 0, m.r * 0.35, 0, 7); ctx.fill(); ctx.restore();
     }
+    try {
     // portais (iguais aos da campanha): entrar em um leva ao outro; reativam só depois de sair da área de chegada
     (lv.portals || []).forEach((pr, pi) => {
+      dc.portals++;
       const col = ["#19f0ff", "#ff3df2", "#ffd23f"][pi % 3];
       for (const end of ["a", "b"]) {
         const q = pr[end]; ctx.save(); ctx.translate(q.x, q.y); glow(col, 14);
@@ -904,14 +955,19 @@
         ctx.font = "bold 9px sans-serif"; ctx.fillText("PORTAL " + (pi + 1), 0, 28); ctx.restore();
       }
     });
+    } catch (e) { drawFail("portais", e); }
+    try {
     // drones de patrulha (matam qualquer um): rota discreta + corpo
     (lv.drones || []).forEach((d) => {
+      dc.drones++;
       ctx.strokeStyle = "rgba(255,45,85,.22)"; ctx.lineWidth = 2; ctx.setLineDash([3, 7]); ctx.beginPath();
       d.route.forEach((q, i) => (i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1]))); if (d.route.length > 2) ctx.closePath(); ctx.stroke(); ctx.setLineDash([]);
       const q = dronePosJS(d, t), rr = (d.r || 12) + 3;
       ctx.save(); ctx.translate(q[0], q[1]); glow("#ff2d55", 14); ctx.fillStyle = "#ff2d55"; ctx.beginPath(); ctx.moveTo(0, -rr); ctx.lineTo(rr, 0); ctx.lineTo(0, rr); ctx.lineTo(-rr, 0); ctx.closePath(); ctx.fill(); noGlow();
       ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(0, 0, 3.5, 0, 7); ctx.fill(); ctx.strokeStyle = "#fff"; ctx.lineWidth = 1.5; ctx.stroke(); ctx.restore();
     });
+    } catch (e) { drawFail("drones", e); }
+    C.drawn = dc;
     // porta de saída e ÁREA de saída (todos precisam estar dentro dela, vivos, ao mesmo tempo)
     const d = lv.door, open = !!(s && s.k);
     ctx.strokeStyle = open ? "rgba(57,255,136,.8)" : "rgba(140,136,184,.55)"; ctx.lineWidth = 2; ctx.setLineDash([8, 6]);

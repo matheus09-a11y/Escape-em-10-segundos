@@ -38,7 +38,7 @@ async def handle(cr, cw, base, jit):
     await asyncio.gather(pipe(cr, sw, base, jit), pipe(sr, cw, base, jit))
 
 async def main(base, jit, lim):
-    env = dict(os.environ, PORT=str(SRV), HOST="127.0.0.1")
+    env = dict(os.environ, PORT=str(SRV), HOST="127.0.0.1", REQUIRE_BUILD="0")
     srv = subprocess.Popen([sys.executable, "server.py"], cwd=here, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     prox = None
     try:

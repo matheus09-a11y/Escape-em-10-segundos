@@ -66,7 +66,7 @@ def drain(c):
     while not c.q.empty(): c.q.get_nowait()
 
 async def main():
-    env = dict(os.environ, PORT="8831", HOST="127.0.0.1")
+    env = dict(os.environ, PORT="8831", HOST="127.0.0.1", REQUIRE_BUILD="0")
     srv = subprocess.Popen([sys.executable, "server.py"], cwd=here, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     try:
         for _ in range(50):
