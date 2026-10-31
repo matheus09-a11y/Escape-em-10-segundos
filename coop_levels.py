@@ -142,21 +142,209 @@ LEVELS.append({
     "key": [700, 430], "door": [760, 230],
 })
 
+# ======================================================================================
+# FASES NOVAS: conjuntos "Dupla" (exatamente 2 jogadores) e "Trio" (exatamente 3).
+# Os papéis são FIXOS nestas fases (o 1º jogador é 🔥 brasa, o 2º 💧 onda, o 3º 🌿 folha) para o desenho
+# saber quem atravessa cada perigo. Tudo usa só mecanismos que já existem: paredes, placas de pressão
+# (hold), interruptores (trava), portas, chave, saída em área, espinhos, lasers e serras.
+# Regras de projeto (conferidas em test_coop.py): ninguém precisa largar uma placa e ficar preso; as portas
+# nunca fecham sobre alguém; a saída exige TODOS; cabem em 25 s com folga (o robô perfeito leva ~4-9 s).
+# ======================================================================================
+def gate_r(x, y, w, h, plates):
+    return {"r": [x, y, w, h], "plates": plates}
+
+
+def lane_walls(x0, x1, y1, y2, t=20):
+    """Duas paredes horizontais que formam 3 corredores (cima / meio / baixo)."""
+    return hwall(y1, t, x0, x1) + hwall(y2, t, x0, x1)
+
+
+NEW_LEVELS = []
+
+# ---------------------------------------------------------------- DUPLA
+# D1 Revezamento: A segura a placa (porta do parceiro); B passa, liga o interruptor e solta a passagem de A.
+NEW_LEVELS.append({
+    "set": "duo", "name": "Revezamento", "players": 2,
+    "hint": "🔥 segura a placa ▼ na esquerda: abre a porta para 💧. 💧 passa e liga o interruptor ◉ que abre o caminho do parceiro. Depois: chave e saída.",
+    "starts": [[60, 150], [60, 350]],
+    "walls": vwall(300, 20, [(60, 110), (225, 275)]),
+    "spikes": [], "lasers": [], "saws": [],
+    "plates": [{"x": 130, "y": 150, "hold": True}, {"x": 480, "y": 120, "hold": False}],
+    "gates": [gate_v(300, 20, 225, 275, [0]), gate_v(300, 20, 60, 110, [1])],
+    "key": [620, 400], "door": [730, 250],
+})
+# D2 Caminhos paralelos: cada um liga o interruptor que abre a passagem do outro; cada um atravessa o seu perigo.
+NEW_LEVELS.append({
+    "set": "duo", "name": "Caminhos paralelos", "players": 2,
+    "hint": "O interruptor ◆ de cada um abre a passagem do outro. 🔥 segue pelo corredor de espinhos, 💧 pelo do laser. A chave está no túnel do meio.",
+    "starts": [[60, 90], [60, 410]],
+    "walls": vwall(250, 20, [(60, 110), (390, 440)]) + lane_walls(270, 560, 170, 330),
+    "spikes": [[380, 0, 70, 170]],
+    "lasers": [{"r": [420, 350, 12, 150], "on": 4, "off": 0, "offset": 0}],
+    "saws": [],
+    "plates": [{"x": 140, "y": 120, "hold": False}, {"x": 140, "y": 380, "hold": False}],
+    "gates": [gate_v(250, 20, 60, 110, [1]), gate_v(250, 20, 390, 440, [0])],
+    "key": [440, 250], "door": [730, 250],
+})
+# D3 Travessia protegida: 🔥 cruza os espinhos e liga o interruptor que abre a passagem segura de 💧; depois 💧 cruza o laser e abre a de 🔥.
+NEW_LEVELS.append({
+    "set": "duo", "name": "Travessia protegida", "players": 2,
+    "hint": "🔥 atravessa os espinhos e liga ◆ para abrir a porta de 💧. Depois 💧 atravessa o laser e liga ● para abrir a porta de 🔥. Chave e saída à direita.",
+    "starts": [[60, 100], [60, 400]],
+    "walls": vwall(300, 20, [(40, 140), (360, 410)]) + vwall(560, 20, [(350, 420), (40, 140)]),
+    "spikes": [[275, 40, 70, 100]],
+    "lasers": [{"r": [558, 350, 24, 70], "on": 4, "off": 0, "offset": 0}],
+    "saws": [],
+    "plates": [{"x": 430, "y": 90, "hold": False}, {"x": 650, "y": 385, "hold": False}],
+    "gates": [gate_v(300, 20, 360, 410, [0]), gate_v(560, 20, 40, 140, [1])],
+    "key": [680, 250], "door": [750, 250],
+})
+# D4 Encontro: começam longe; cada um liga o interruptor que abre a entrada do outro na câmara central, onde estão a chave e a saída.
+NEW_LEVELS.append({
+    "set": "duo", "name": "Encontro", "players": 2,
+    "hint": "Cada um liga o seu interruptor ◆ para abrir a entrada do parceiro na câmara do meio (🔥 pelos espinhos, 💧 pelo laser). A chave e a saída ficam lá dentro.",
+    "starts": [[60, 100], [740, 400]],
+    "walls": hwall(150, 20, 300, 500) + hwall(330, 20, 300, 500)
+             + [[300, 170, 20, 55], [300, 275, 20, 55], [480, 170, 20, 55], [480, 275, 20, 55]]
+             + hwall(205, 20, 140, 300) + hwall(275, 20, 140, 300) + hwall(205, 20, 500, 660) + hwall(275, 20, 500, 660),
+    "spikes": [[180, 225, 60, 50]],
+    "lasers": [{"r": [570, 225, 12, 50], "on": 4, "off": 0, "offset": 0}],
+    "saws": [],
+    "plates": [{"x": 100, "y": 350, "hold": False}, {"x": 700, "y": 150, "hold": False}],
+    "gates": [gate_r(300, 225, 20, 50, [1]), gate_r(480, 225, 20, 50, [0])],
+    "key": [400, 200], "door": [400, 290],
+})
+# D5 Apoio em cadeia: 🔥 segura → 💧 passa e liga ◉ (libera 🔥); 💧 segura outra placa → 🔥 passa e liga o último interruptor (libera 💧).
+NEW_LEVELS.append({
+    "set": "duo", "name": "Apoio em cadeia", "players": 2,
+    "hint": "1) 🔥 segura a primeira placa, 💧 passa e liga ◉. 2) 💧 segura a segunda placa, 🔥 passa e liga ●. Depois a chave e a saída.",
+    "starts": [[60, 100], [60, 400]],
+    "walls": vwall(240, 20, [(225, 275), (60, 110)]) + vwall(500, 20, [(225, 275), (390, 440)]),
+    "spikes": [], "lasers": [], "saws": [],
+    "plates": [{"x": 130, "y": 150, "hold": True}, {"x": 380, "y": 150, "hold": False}, {"x": 390, "y": 400, "hold": True}, {"x": 640, "y": 120, "hold": False}],
+    "gates": [gate_v(240, 20, 225, 275, [0]), gate_v(240, 20, 60, 110, [1]), gate_v(500, 20, 225, 275, [2]), gate_v(500, 20, 390, 440, [3])],
+    "key": [650, 400], "door": [740, 250],
+})
+# D6 Fuga em dupla: corredores com perigos, placa de segurar, interruptor, chave no túnel.
+NEW_LEVELS.append({
+    "set": "duo", "name": "Fuga em dupla", "players": 2,
+    "hint": "🔥 pelos espinhos até a placa ▼ (abre a porta de 💧); 💧 pelo laser, passa a porta, liga ◉ (libera 🔥). Pegue a chave no túnel e fujam juntos.",
+    "starts": [[60, 100], [60, 400]],
+    "walls": lane_walls(100, 540, 170, 330) + [[100, 190, 20, 140]] + vwall(580, 20, [(225, 275), (60, 110)]),
+    "spikes": [[250, 0, 80, 170]],
+    "lasers": [{"r": [250, 350, 12, 150], "on": 4, "off": 0, "offset": 0}],
+    "saws": [],
+    "plates": [{"x": 500, "y": 90, "hold": True}, {"x": 700, "y": 380, "hold": False}],
+    "gates": [gate_v(580, 20, 225, 275, [0]), gate_v(580, 20, 60, 110, [1])],
+    "key": [470, 260], "door": [740, 250],
+})
+
+# ---------------------------------------------------------------- TRIO
+# T1 Três posições: 🔥 e 💧 ocupam as placas; 🌿 passa e liga o interruptor que libera todos.
+NEW_LEVELS.append({
+    "set": "trio", "name": "Três posições", "players": 3,
+    "hint": "🔥 e 💧 ficam nas placas ▼ (juntas abrem a porta de baixo). 🌿 passa e liga ◉, que abre a porta grande para todos. Depois chave e saída.",
+    "starts": [[60, 80], [60, 250], [60, 420]],
+    "walls": vwall(300, 20, [(190, 310), (400, 450)]),
+    "spikes": [], "lasers": [], "saws": [],
+    "plates": [{"x": 130, "y": 80, "hold": True}, {"x": 130, "y": 250, "hold": True}, {"x": 460, "y": 420, "hold": False}],
+    "gates": [gate_v(300, 20, 400, 450, [0, 1]), gate_v(300, 20, 190, 310, [2])],
+    "key": [620, 100], "door": [740, 250],
+})
+# T2 Corrente de ajuda: 🔥 segura → 💧 passa e liga ◉ (libera 🔥 e 🌿) → 🌿 liga o interruptor final (abre o caminho para todos).
+NEW_LEVELS.append({
+    "set": "trio", "name": "Corrente de ajuda", "players": 3,
+    "hint": "🔥 segura a placa ▼; 💧 passa e liga ◉ (abre as portas de 🔥 e 🌿); 🌿 liga o interruptor ● da frente: abre a saída para todos.",
+    "starts": [[60, 150], [60, 250], [60, 420]],
+    "walls": vwall(220, 20, [(225, 275), (60, 110), (390, 440)]) + vwall(480, 20, [(225, 275)]),
+    "spikes": [], "lasers": [], "saws": [],
+    "plates": [{"x": 130, "y": 150, "hold": True}, {"x": 360, "y": 250, "hold": False}, {"x": 400, "y": 415, "hold": False}],
+    "gates": [gate_v(220, 20, 225, 275, [0]), gate_v(220, 20, 60, 110, [1]), gate_v(220, 20, 390, 440, [1]), gate_v(480, 20, 225, 275, [2])],
+    "key": [650, 120], "door": [740, 380],
+})
+# T3 Rotas complementares: cada um cruza o seu perigo e liga o seu interruptor; só com os 3 a porta da saída abre.
+NEW_LEVELS.append({
+    "set": "trio", "name": "Rotas complementares", "players": 3,
+    "hint": "🔥 pelos espinhos, 💧 pelo laser, 🌿 pelas serras: cada um liga o seu interruptor ◉ no fim do corredor. Com os três ligados a porta grande abre.",
+    "starts": [[40, 80], [40, 250], [40, 420]],
+    "walls": lane_walls(100, 560, 167, 313) + vwall(600, 20, [(200, 300)]),
+    "spikes": [[260, 0, 80, 167]],
+    "lasers": [{"r": [320, 187, 12, 126], "on": 4, "off": 0, "offset": 0}],
+    "saws": sawcol(300, [363, 413, 463], 20),
+    "plates": [{"x": 540, "y": 90, "hold": False}, {"x": 540, "y": 250, "hold": False}, {"x": 540, "y": 420, "hold": False}],
+    "gates": [gate_v(600, 20, 200, 300, [0, 1, 2])],
+    "key": [690, 400], "door": [740, 120],
+})
+# T4 Controle de passagem: 🔥 segura (💧 e 🌿 passam), depois 💧 segura (🌿 passa); 🌿 liga o interruptor que reúne o grupo.
+NEW_LEVELS.append({
+    "set": "trio", "name": "Controle de passagem", "players": 3,
+    "hint": "🔥 segura a 1ª placa ▼ enquanto 💧 e 🌿 passam. 💧 vai à 2ª placa e segura enquanto 🌿 passa. 🌿 liga ◉ no fim: abre as portas de volta para 🔥 e 💧.",
+    "starts": [[60, 130], [60, 250], [60, 380]],
+    "walls": vwall(240, 20, [(225, 275), (60, 110)]) + vwall(460, 20, [(225, 275), (390, 440)]),
+    "spikes": [], "lasers": [], "saws": [],
+    "plates": [{"x": 140, "y": 130, "hold": True}, {"x": 350, "y": 420, "hold": True}, {"x": 600, "y": 250, "hold": False}],
+    "gates": [gate_v(240, 20, 225, 275, [0]), gate_v(460, 20, 225, 275, [1]), gate_v(240, 20, 60, 110, [2]), gate_v(460, 20, 390, 440, [2])],
+    "key": [690, 120], "door": [740, 400],
+})
+# T5 Revezamento completo: três etapas; em cada uma um segura, outro atravessa e liga o interruptor que libera quem ficou.
+NEW_LEVELS.append({
+    "set": "trio", "name": "Revezamento completo", "players": 3,
+    "hint": "Três etapas: 🔥 segura, 💧 passa e liga ◉. Depois 🌿 segura, 🔥 passa e liga ●. Por fim 💧 segura, 🌿 passa e liga ★. Ninguém fica para trás.",
+    "starts": [[40, 100], [40, 250], [40, 400]],
+    "walls": vwall(180, 20, [(225, 275), (60, 110)]) + vwall(380, 20, [(225, 275), (390, 440)]) + vwall(580, 20, [(225, 275), (60, 110)]),
+    "spikes": [], "lasers": [], "saws": [],
+    "plates": [{"x": 100, "y": 100, "hold": True}, {"x": 290, "y": 250, "hold": False},
+               {"x": 290, "y": 410, "hold": True}, {"x": 490, "y": 130, "hold": False},
+               {"x": 490, "y": 400, "hold": True}, {"x": 690, "y": 400, "hold": False}],
+    "gates": [gate_v(180, 20, 225, 275, [0]), gate_v(180, 20, 60, 110, [1]),
+              gate_v(380, 20, 225, 275, [2]), gate_v(380, 20, 390, 440, [3]),
+              gate_v(580, 20, 225, 275, [4]), gate_v(580, 20, 60, 110, [5])],
+    "key": [690, 130], "door": [740, 300],
+})
+# T6 Fuga em trio: corredores com perigos + duas placas + chave nas serras + interruptor final.
+NEW_LEVELS.append({
+    "set": "trio", "name": "Fuga em trio", "players": 3,
+    "hint": "Cada um cruza o seu corredor. 🔥 e 💧 seguram as placas ▼ (abrem a porta de 🌿). 🌿 pega a chave entre as serras e liga ◉: abre a porta de saída para todos.",
+    "starts": [[40, 80], [40, 250], [40, 420]],
+    "walls": lane_walls(100, 560, 167, 313) + vwall(600, 20, [(390, 450), (190, 310)]),
+    "spikes": [[260, 0, 80, 167]],
+    "lasers": [{"r": [320, 187, 12, 126], "on": 4, "off": 0, "offset": 0}],
+    "saws": sawcol(300, [363, 413, 463], 20) + ring(700, 420, 45, 8, 20),
+    "plates": [{"x": 540, "y": 90, "hold": True}, {"x": 540, "y": 250, "hold": True}, {"x": 700, "y": 130, "hold": False}],
+    "gates": [gate_v(600, 20, 390, 450, [0, 1]), gate_v(600, 20, 190, 310, [2])],
+    "key": [700, 420], "door": [740, 250],
+})
+
 # mínimo de jogadores para a fase ser possível (placas de segurar exigem gente para segurar E passar)
 MIN_PLAYERS = [1, 1, 2, 3, 3]
 # menor tempo (s) em que um robô perfeito conclui a fase (medido em test_coop.py): abaixo disso é impossível
 PAR = [3, 4, 6, 6, 10]
+NEW_PAR = [5, 5, 5, 3, 6, 5, 5, 5, 5, 8, 9, 5]     # fases 6..17 (Dupla e Trio)
+for i, lv in enumerate(LEVELS):
+    lv.update({"set": "classic", "players": None, "fixed": False, "min": MIN_PLAYERS[i], "par": PAR[i],
+               "intro": lv["hint"]})
+LEVELS.extend(NEW_LEVELS)
 for i, lv in enumerate(LEVELS):
     lv["id"] = i + 1
-    lv["min"] = MIN_PLAYERS[i]
-    lv["par"] = PAR[i]
+    if lv["set"] != "classic":
+        lv.setdefault("time", 25)
+        lv["fixed"] = True                  # papéis definidos pela fase (por ordem de vaga)
+        lv["min"] = lv["players"]
+        lv["par"] = NEW_PAR[i - 5]       # menor tempo do robô perfeito (test_fases.py), arredondado para cima
+        lv["intro"] = lv["hint"]
+        lv["roles"] = ROLE_IDS[:lv["players"]]
 
 
 def public(lv):
     """O que o cliente precisa para desenhar a fase (cópia sem nada interno)."""
-    keys = ("id", "name", "time", "min", "par", "hint", "starts", "walls", "spikes", "lasers", "saws", "plates", "gates", "key", "door")
-    return {k: lv[k] for k in keys}
+    keys = ("id", "name", "time", "min", "par", "set", "players", "fixed", "roles", "intro", "hint", "starts", "walls", "spikes", "lasers", "saws", "plates", "gates", "key", "door")
+    return {k: lv.get(k) for k in keys}
+
+
+def compatible(lv, n):
+    """A fase serve para uma sala de n jogadores? Clássicas: n >= mínimo. Dupla/Trio: exatamente n."""
+    return lv["min"] <= n if lv["set"] == "classic" else lv["players"] == n
 
 
 def catalog():
-    return [{"id": lv["id"], "name": lv["name"], "time": lv["time"], "min": lv["min"], "par": lv["par"]} for lv in LEVELS]
+    return [{"id": lv["id"], "name": lv["name"], "time": lv["time"], "min": lv["min"], "par": lv["par"], "set": lv["set"], "players": lv["players"], "name2": lv["name"]} for lv in LEVELS]

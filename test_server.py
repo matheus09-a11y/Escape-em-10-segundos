@@ -84,7 +84,7 @@ async def main():
         print("WebSocket e salas")
         a, b, c = WS(), WS(), WS()
         for x in (a, b, c): check("handshake 101", await x.connect())
-        hi = await a.expect("hi"); check("hello traz catálogo de fases e papéis", hi and len(hi["levels"]) == 5 and set(hi["roles"]) == {"brasa", "onda", "folha"})
+        hi = await a.expect("hi"); check("hello traz catálogo de fases e papéis", hi and len(hi["levels"]) == 17 and set(hi["roles"]) == {"brasa", "onda", "folha"})
         b.send(t="join", code="ZZZZ", name="x"); e = await b.expect("err"); check("sala inexistente dá erro", e and "não encontrada" in e["msg"])
         a.send(t="create", name="Ana", skin="robot"); j = await a.expect("joined"); check("criar sala devolve código de 4 letras", j and len(j["code"]) == 4 and j["you"] == 0)
         code = j["code"]
@@ -351,6 +351,115 @@ async def main():
         ids = [m["i"] for m in z.evs if "i" in m]
         check("eventos têm contador crescente sem repetição", ids == sorted(set(ids)) and len(ids) >= 1, ids[:6])
         z.send(t="leave"); o.send(t="leave"); await asyncio.sleep(0.3)
+
+        print("Conjuntos Dupla e Trio: exatamente 2 / 3 jogadores, papéis fixos, partida de ponta a ponta")
+        cat = hi["levels"]
+        check("catálogo: 5 clássicas, 6 de Dupla (2 jogadores) e 6 de Trio (3 jogadores)", [x["set"] for x in cat].count("classic") == 5 and [x["players"] for x in cat if x["set"] == "duo"] == [2] * 6 and [x["players"] for x in cat if x["set"] == "trio"] == [3] * 6)
+        duo_i, trio_i = next(k for k, x in enumerate(cat) if x["set"] == "duo"), next(k for k, x in enumerate(cat) if x["set"] == "trio")
+        g = [WS() for _ in range(3)]
+        for x in g: await x.connect(); await x.expect("hi")
+        g[0].send(t="create", name="G0"); j = await g[0].expect("joined"); cg = j["code"]
+        for k in (1, 2): g[k].send(t="join", code=cg, name="G%d" % k); await g[k].expect("joined")
+        await asyncio.sleep(0.2)
+        g[0].send(t="level", n=duo_i); e = await g[0].expect("err"); check("fase de Dupla numa sala de 3 é recusada com o motivo", e and "exatamente 2" in e["msg"] and g[0].room["level"] != duo_i, e)
+        g[0].send(t="level", n=trio_i); await asyncio.sleep(0.2); check("fase de Trio numa sala de 3 é aceita", g[0].room["level"] == trio_i, g[0].room)
+        for x in g: x.send(t="role", role="brasa")
+        await asyncio.sleep(0.2)
+        check("em fases novas os papéis são fixos (escolha de papel ignorada)", all(not p["roles"] for p in g[0].room["players"] if p), g[0].room)
+        for x in g: x.send(t="ready", v=True)
+        await asyncio.sleep(0.2); g[0].send(t="start"); await asyncio.sleep(0.8)
+        check("Trio começa com 3 jogadores e papéis por ordem de vaga", g[0].level and g[0].level["roles"] == [["brasa"], ["onda"], ["folha"]] and g[0].level["level"]["players"] == 3, g[0].level and g[0].level["roles"])
+        # ---- partida de ponta a ponta no Trio 1 (Três posições) com 3 clientes e direção por estado
+        sp = lambda snap, k: snap["p"][k]
+        async def walk(x, k, tx, ty, tol=14):
+            for _ in range(500):
+                s_ = x.snap
+                if s_["ph"] == "won": return
+                px_, py_ = s_["p"][k][0], s_["p"][k][1]
+                d_ = math.hypot(tx - px_, ty - py_)
+                if d_ < tol: break
+                x.send(t="in", x=(tx - px_) / d_, y=(ty - py_) / d_); await asyncio.sleep(0.04)
+            x.send(t="in", x=0, y=0)
+        async def until(x, cond, tmo=15):
+            end = time.monotonic() + tmo
+            while time.monotonic() < end and not cond(x.snap):
+                await asyncio.sleep(0.05)
+        for _ in range(80):
+            if g[0].snap and g[0].snap["ph"] == "play": break
+            await asyncio.sleep(0.1)
+        async def a_(x):   # 🔥: placa 0 até soltar a porta H (gate 1)
+            await walk(x, 0, 130, 80, 5)
+            await until(x, lambda s_: s_["g"][1] == 1); await walk(x, 0, 310, 250); await walk(x, 0, 620, 100); await walk(x, 0, 740, 250, 6)
+        async def b_(x):
+            await walk(x, 1, 130, 250, 5)
+            await until(x, lambda s_: s_["g"][1] == 1); await walk(x, 1, 310, 250); await walk(x, 1, 740, 250, 6)
+        async def c_(x):
+            await walk(x, 2, 200, 420); await until(x, lambda s_: s_["g"][0] == 1); await walk(x, 2, 340, 425); await walk(x, 2, 460, 420, 8); await walk(x, 2, 740, 250, 6)
+        await asyncio.gather(a_(g[0]), b_(g[1]), c_(g[2]))
+        await until(g[0], lambda s_: s_["ph"] == "won" or s_["a"] > 1, 10)
+        check("Trio 1: vitória com os 3 clientes pela rede (placas, interruptor, porta, chave, saída)", any(e[0] == "win" for e in g[0].events), g[0].snap)
+        # avança sozinho para a próxima fase do MESMO conjunto
+        for _ in range(60):
+            if g[0].level and g[0].level["n"] == trio_i + 1: break
+            await asyncio.sleep(0.1)
+        check("depois da vitória segue para a próxima fase do Trio (e não para outro conjunto)", g[0].level and g[0].level["n"] == trio_i + 1 and g[0].level["level"]["set"] == "trio", g[0].level and g[0].level["n"])
+        for x in g: x.send(t="leave")
+        await asyncio.sleep(0.3)
+        # ---- Dupla: sala de 2
+        d2 = [WS() for _ in range(2)]
+        for x in d2: await x.connect(); await x.expect("hi")
+        d2[0].send(t="create", name="D0"); j = await d2[0].expect("joined"); cd = j["code"]
+        d2[1].send(t="join", code=cd, name="D1"); await d2[1].expect("joined")
+        d2[0].send(t="size", n=2); await asyncio.sleep(0.2)
+        d2[0].send(t="level", n=trio_i); e = await d2[0].expect("err"); check("fase de Trio numa sala de 2 é recusada com o motivo", e and "exatamente 3" in e["msg"], e)
+        d2[0].send(t="level", n=duo_i); await asyncio.sleep(0.2); check("fase de Dupla numa sala de 2 é aceita", d2[0].room["level"] == duo_i)
+        for x in d2: x.send(t="ready", v=True)
+        await asyncio.sleep(0.2); d2[0].send(t="start"); await asyncio.sleep(0.8)
+        check("Dupla começa com papéis 🔥 e 💧", d2[0].level and d2[0].level["roles"] == [["brasa"], ["onda"]], d2[0].level and d2[0].level["roles"])
+        for _ in range(80):
+            if d2[0].snap and d2[0].snap["ph"] == "play": break
+            await asyncio.sleep(0.1)
+        async def da(x):   # Revezamento: 🔥 segura a placa até o interruptor ser ligado, depois passa pela porta de cima
+            await walk(x, 0, 130, 150, 5); await until(x, lambda s_: s_["g"][1] == 1); await walk(x, 0, 310, 85); await walk(x, 0, 400, 85); await walk(x, 0, 730, 250, 6)
+        async def db(x):
+            await walk(x, 1, 200, 250); await until(x, lambda s_: s_["g"][0] == 1); await walk(x, 1, 340, 250); await walk(x, 1, 480, 120, 8); await walk(x, 1, 620, 400); await walk(x, 1, 730, 250, 6)
+        await asyncio.gather(da(d2[0]), db(d2[1]))
+        await until(d2[0], lambda s_: s_["ph"] == "won" or s_["a"] > 1, 10)
+        check("Dupla 1: vitória com 2 clientes pela rede", any(e[0] == "win" for e in d2[0].events), d2[0].snap)
+        d2[0].send(t="restart", a=d2[0].snap["a"]); await asyncio.sleep(0.5)
+        for x in d2: x.send(t="leave")
+        await asyncio.sleep(0.3)
+        # ---- aviso de reinício pelo anfitrião
+        r3 = [WS() for _ in range(2)]
+        for x in r3: await x.connect(); await x.expect("hi")
+        r3[0].send(t="create", name="R0"); j = await r3[0].expect("joined"); r3[1].send(t="join", code=j["code"], name="R1"); await r3[1].expect("joined")
+        r3[0].send(t="size", n=2); await asyncio.sleep(0.1); r3[0].send(t="level", n=duo_i); await asyncio.sleep(0.1)
+        for x in r3: x.send(t="ready", v=True)
+        await asyncio.sleep(0.2); r3[0].send(t="start")
+        for _ in range(80):
+            if r3[1].snap and r3[1].snap["ph"] == "play": break
+            await asyncio.sleep(0.1)
+        r3[1].evs = []; r3[0].send(t="restart", a=r3[0].snap["a"]); await asyncio.sleep(0.5)
+        check("reinício do anfitrião é avisado a todos (evento rs com o autor)", any(m["e"][0] == "rs" and m["e"][1] == 0 for m in r3[1].evs), r3[1].evs[:3])
+        for x in r3: x.send(t="leave")
+        await asyncio.sleep(0.3)
+
+        print("Várias tentativas seguidas: sem eventos duplicados")
+        u = WS(); await u.connect(); await u.expect("hi")
+        u.send(t="create", name="Rep"); await u.expect("joined"); u.send(t="size", n=1); u.send(t="role", role="onda"); await asyncio.sleep(0.1)
+        u.send(t="limit", v=5); u.send(t="level", n=0); await asyncio.sleep(0.1); u.send(t="ready", v=True); await asyncio.sleep(0.1); u.send(t="start")
+        end = time.monotonic() + 36
+        while time.monotonic() < end and not (u.snap and u.snap["a"] >= 4):
+            await asyncio.sleep(0.3)
+        att = u.snap["a"]
+        ids = [m["i"] for m in u.evs]
+        loses = [m for m in u.evs if m["e"][0] == "lose"]
+        starts = [m for m in u.evs if m["e"][0] == "start"]
+        check(f"chegou à tentativa {att} (≥ 4) só com o tempo esgotando", att >= 4, att)
+        check("contador de eventos estritamente crescente (nenhum repetido)", ids == sorted(set(ids)), ids[:10])
+        check("exatamente uma derrota por tentativa já terminada", sorted(m["a"] for m in loses) == list(range(1, len(loses) + 1)) and len(loses) >= att - 1, [(m["a"]) for m in loses])
+        check("exatamente um 'início' por tentativa", [m["a"] for m in starts] == sorted(set(m["a"] for m in starts)), [m["a"] for m in starts])
+        u.send(t="leave"); await asyncio.sleep(0.3)
 
         d = json.loads((await http("/health")).split(b"\r\n\r\n")[1]); print("         estado final:", d)
     finally:

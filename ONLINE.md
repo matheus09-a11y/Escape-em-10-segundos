@@ -50,3 +50,26 @@ Não há contas nem moderação: quem tem o código entra na sala (3 vagas).
   Trocar de aba não pausa ninguém: os comandos de movimento são limpos ao perder o foco e o servidor ignora direção parada.
   Se o anfitrião sair, outro jogador vira anfitrião (migração) e a partida em andamento é encerrada com aviso.
 - **Marcações**: `mark` (k 0..2: Aqui! / Preciso de ajuda! / Vá para a saída!, x, y); no máximo 1 a cada 1,2 s por jogador; sem texto livre.
+
+## Rede: resposta dos controles (previsão + reconciliação)
+
+- O navegador envia o movimento em **comandos numerados** (`mv`: `{s: primeiro número, d: [códigos 0..8]}`; 1 comando = 1/60 s; 8 direções).
+  Idle não envia nada; mudança de direção sai na hora; o resto sai em lotes de ~30 ms. O servidor aplica 1 comando por quadro
+  (fila de no máximo 8: não dá para andar mais rápido mandando comandos demais), descarta números repetidos/antigos e devolve em cada
+  quadro o último número aplicado (`ak`). `in` (direção por estado) continua aceito para robôs e navegadores antigos.
+- O boneco **local** é previsto no navegador com a mesma regra do servidor (colisões com paredes e com as portas como o servidor as mostrou).
+  A cada quadro do servidor, o navegador refaz os comandos ainda não aplicados em cima da posição autorizada e compara com o que previu:
+  erro pequeno some aos poucos na tela, erro grande (> 40 u) é corrigido na hora. A previsão **nunca** abre porta, decide morte, vitória ou tempo.
+- Os **outros** jogadores são interpolados (buffer de ~90 ms, extrapolação limitada a 100 ms) usando o relógio do servidor.
+- Eventos levam contador (`i`) e tentativa (`a`): repetidos e antigos são descartados. Evento de placa/porta/chave gera quadro imediato.
+- Não há impulso (dash) no modo cooperativo, então não há o que reconciliar nele.
+- **Diagnóstico** (desligado por padrão): tecla **F3** durante a partida, ou Menu → "Diagnóstico de rede". Mostra só valores medidos
+  no navegador: FPS e pior quadro, RTT (ping real) e mediana, quadros/s recebidos e KB/s, lotes e comandos/s enviados, correções do boneco
+  local (quantas, média, máxima), comandos a caminho, tamanho do buffer de interpolação e eventos descartados.
+- `tools/latproxy.py` é um proxy que acrescenta latência/variação em cada sentido para medir (usado em `test_latencia.py` e nas medições).
+
+## Fases novas
+
+- **Dupla** (6 fases, exatamente 2 jogadores) e **Trio** (6 fases, exatamente 3 jogadores), além das 5 clássicas. Papéis fixos por ordem de
+  vaga (1º 🔥, 2º 💧, 3º 🌿). A sala recusa iniciar com a quantidade errada e explica o requisito. Depois de vencer, segue para a próxima
+  fase do mesmo conjunto. `python3 test_fases.py` confere estrutura, alcance, vitória de robôs e 25 execuções perturbadas por fase.

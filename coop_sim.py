@@ -77,7 +77,8 @@ class Sim:
     def reset(self):
         self.attempt += 1
         lv = self.lv
-        self.pos = [[float(lv["starts"][k][0]), float(lv["starts"][k][1])] for k in START_SLOTS[self.n]]
+        idx = list(range(self.n)) if len(lv["starts"]) == self.n else START_SLOTS[self.n]     # fases novas trazem uma largada por jogador
+        self.pos = [[float(lv["starts"][k][0]), float(lv["starts"][k][1])] for k in idx]
         self.esc = [False] * self.n
         self.has_key = False
         self.latched = [False] * len(lv["plates"])

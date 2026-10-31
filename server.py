@@ -24,7 +24,7 @@ import struct
 import sys
 import time
 
-from coop_levels import LEVELS, ROLES, ROLE_IDS, SKIN_IDS, public, catalog
+from coop_levels import LEVELS, ROLES, ROLE_IDS, SKIN_IDS, public, catalog, compatible
 from coop_sim import Sim
 
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -265,11 +265,13 @@ class Room:
         ss = self.slots[:self.size]
         if any(x is None or not (x.conn and x.conn.alive) for x in ss):
             return f"Precisamos de {self.size} jogador{'es' if self.size > 1 else ''} conectado{'s' if self.size > 1 else ''}."
-        if any(len(x.roles) != 1 for x in ss):
+        lv = LEVELS[self.level]
+        if not compatible(lv, self.size):
+            if lv["set"] == "classic":
+                return f"Essa fase precisa de pelo menos {lv['min']} jogadores."
+            return f"Essa fase é só para exatamente {lv['players']} jogadores (esta sala tem {self.size})."
+        if not lv["fixed"] and any(len(x.roles) != 1 for x in ss):
             return "Cada jogador precisa escolher 1 poder."
-        need = LEVELS[self.level]["min"]
-        if self.size < need:
-            return f"Essa fase precisa de pelo menos {need} jogadores."
         if any(not x.ready for x in ss):
             return "Todos precisam estar prontos."
         return None
@@ -284,6 +286,9 @@ class Room:
         self.paused = False
         self.won_at = None
         lv = LEVELS[self.level]
+        if lv["fixed"]:                     # fases novas: papéis definidos pela fase, por ordem de vaga
+            for i, x in enumerate(self.slots[:self.size]):
+                x.roles = [ROLE_IDS[i]]
         self.sim = Sim(lv, [s.roles for s in self.slots[:self.size]], limit=self.limit, wait=True)
         self.load_t0 = time.monotonic()
         for s in self.slots:
@@ -302,13 +307,15 @@ class Room:
         self.task = asyncio.ensure_future(self.run())
 
     def advance(self):
-        """Depois da vitória: segue sozinho para a próxima fase possível (ou encerra)."""
-        nxt = next((i for i in range(self.level + 1, len(LEVELS)) if LEVELS[i]["min"] <= self.size), None)
+        """Depois da vitória: segue sozinho para a próxima fase do mesmo conjunto (ou encerra)."""
+        cur = LEVELS[self.level]
+        nxt = next((i for i in range(self.level + 1, len(LEVELS)) if LEVELS[i]["set"] == cur["set"] and compatible(LEVELS[i], self.size)), None)
         if nxt is not None:
             self.level = nxt
             self.start_game()
         else:
-            self.stop_game("Vocês zeraram o que dava para jogar com " + str(self.size) + " jogador" + ("es" if self.size > 1 else "") + "! 🏆")
+            nome = {"classic": "as fases clássicas possíveis com " + str(self.size) + " jogador" + ("es" if self.size > 1 else ""), "duo": "o conjunto Dupla", "trio": "o conjunto Trio"}[cur["set"]]
+            self.stop_game(f"Vocês zeraram {nome}! 🏆")
 
     def stop_game(self, why=None):
         self.phase = "lobby"
@@ -512,7 +519,7 @@ def handle(conn, m):
         return err(conn, "Entre em uma sala primeiro.")
     me = room.slots[conn.slot]
     if t == "role":
-        if room.phase != "lobby":
+        if room.phase != "lobby" or LEVELS[room.level]["fixed"]:
             return
         r = m.get("role")
         if r is None:
@@ -574,8 +581,8 @@ def handle(conn, m):
         for x in room.slots:
             if x:
                 x.roles = []
-        if LEVELS[room.level]["min"] > n:
-            room.level = next(i for i, lv in enumerate(LEVELS) if lv["min"] <= n)
+        if not compatible(LEVELS[room.level], n):
+            room.level = next(i for i, lv in enumerate(LEVELS) if lv["set"] == "classic" and compatible(lv, n))
         room.push_state()
     elif t == "cerr":
         if conn.cerr < 3:       # relatório de erro de desenho do navegador de alguém (ajuda a achar bugs)
@@ -589,8 +596,10 @@ def handle(conn, m):
             return
         n = m.get("n")
         if isinstance(n, int) and not isinstance(n, bool) and 0 <= n < len(LEVELS):
-            if LEVELS[n]["min"] > room.size:
-                return err(conn, f"Essa fase precisa de pelo menos {LEVELS[n]['min']} jogadores.")
+            if not compatible(LEVELS[n], room.size):
+                if LEVELS[n]["set"] == "classic":
+                    return err(conn, f"Essa fase precisa de pelo menos {LEVELS[n]['min']} jogadores.")
+                return err(conn, f"Essa fase é só para exatamente {LEVELS[n]['players']} jogadores (esta sala tem {room.size}).")
             room.level = n
             room.reset_ready()
             room.push_state()
@@ -640,6 +649,8 @@ def handle(conn, m):
         # só vale para a tentativa atual (um clique atrasado não reinicia a seguinte) e só com o jogo rodando
         if conn.slot == room.host and room.phase == "playing" and room.sim and room.sim.phase in ("count", "play") and (a is None or a == room.sim.attempt):
             room.sim.reset()
+            room.evn += 1
+            room.broadcast({"t": "ev", "a": room.sim.attempt, "i": room.evn, "e": ["rs", conn.slot]})     # aviso visível para o grupo
             room.broadcast(room.snap())
     elif t == "next":
         if conn.slot == room.host and room.phase == "playing" and room.sim and room.sim.phase == "won":

@@ -78,7 +78,7 @@ def scripts(n, sim):
     return b
 
 print("Estrutura das fases")
-for n, lv in enumerate(LEVELS, 1):
+for n, lv in enumerate(LEVELS[:5], 1):          # as 12 fases novas são verificadas em test_fases.py
     s = Sim(lv, ROLE_IDS)
     from coop_sim import circle_rect, PLAYER_R
     free = all(not any(circle_rect(p[0], p[1], PLAYER_R, w) for w in lv["walls"]) for p in s.pos)
@@ -116,7 +116,7 @@ check("fase 3 com 1 jogador não tem solução (por isso exige 2)", sim.phase ==
 sim = Sim(LEVELS[1], [["brasa"], ["folha"]])
 res = run(sim, [seq(sim, 0, [(600, 100), (650, 110), (740, 420)]), seq(sim, 1, [(600, 400), (740, 420)])], max_s=30 + COUNTDOWN + 5)
 check("fase 2 com 2 jogadores (brasa e folha, cada um no seu corredor): vitória", res == "won" and sim.n == 2, f"{sim.phase} {sim.result}")
-check("fases 3, 4 e 5 exigem 2, 3 e 3 jogadores", [lv["min"] for lv in LEVELS] == [1, 1, 2, 3, 3])
+check("fases clássicas 3, 4 e 5 exigem 2, 3 e 3 jogadores", [lv["min"] for lv in LEVELS[:5]] == [1, 1, 2, 3, 3])
 
 print("Papéis errados / regras")
 def dies(n, who, roles, steps, why, lane=None):

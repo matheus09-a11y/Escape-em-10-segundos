@@ -45,7 +45,7 @@
 
   const C = {
     ws: null, url: "", same: false, probed: false, hi: null, you: null, code: "", token: "", room: null, level: null, roles: [],
-    view: "connect", snap: null, snapAt: 0, off: null, att: 0, pr: null, hist: [], seq: 1, acc: 0, outbox: [], flushedCode: 0, lastFlush: 0, lastCode: 0, dispOff: { x: 0, y: 0 }, ring: [], lastI: 0, marks: [], armed: -1, armT: 0, lastMark: 0, shown: [null, null, null], pose: [null, null, null], emos: [], rtt: null, closing: false, retryTimer: 0, retryStart: 0,
+    view: "connect", snap: null, snapAt: 0, sel: null, off: null, att: 0, pr: null, hist: [], seq: 1, acc: 0, outbox: [], flushedCode: 0, lastFlush: 0, lastCode: 0, dispOff: { x: 0, y: 0 }, ring: [], lastI: 0, marks: [], armed: -1, armT: 0, lastMark: 0, shown: [null, null, null], pose: [null, null, null], emos: [], rtt: null, closing: false, retryTimer: 0, retryStart: 0,
     lastCount: -1, result: null, loseUntil: 0, loseText: "", lastFrame: 0, raf: 0, sentDir: [0, 0], dirAt: 0, goFlash: 0, pausedBy: -1,
   };
 
@@ -360,12 +360,18 @@
     if (!infos.length) return { name: "?", icon: "●", color: "#aaa" };
     return { name: infos.map((x) => x.name).join(" + "), icon: infos.map((x) => x.icon).join(""), color: infos[0].color };
   }
+  const SETS = [["classic", "Clássicas"], ["duo", "Dupla — exatamente 2 jogadores"], ["trio", "Trio — exatamente 3 jogadores"]];
+  const SET_TAG = { classic: "", duo: "Dupla · ", trio: "Trio · " };
+  function levelOk(l, size) { return l.set === "classic" || !l.set ? (l.min || 1) <= size : l.players === size; }
+  function levelNeed(l) { return !l.set || l.set === "classic" ? ((l.min || 1) > 1 ? `${l.min}+ jogadores` : "1 a 3 jogadores") : `exatamente ${l.players} jogadores`; }
+  function isFixed(l) { return !!l && l.set && l.set !== "classic"; }
   function nP() { return C.roles && C.roles.length ? C.roles.length : 3; }
   function onEvent(e) {
     const k = e[0];
     if (k === "key") { sfx("key"); banner(`🗝 ${name(e[1])} pegou a chave! Agora todos podem usar a porta.`, "good", 3500); }
     else if (k === "gate") { sfx("switch"); }
     else if (k === "plate") { if (e[2]) sfx("blip"); }
+    else if (k === "rs") { sfx("blip"); banner(`🔄 ${name(e[1])} reiniciou a tentativa para todos.`, "info", 3000); }
     else if (k === "esc") { if (e[2]) sfx("portal"); }
     else if (k === "go") { sfx("blip"); C.goFlash = performance.now(); }
     else if (k === "lose") {
@@ -400,7 +406,7 @@
       li.className = "co-slot" + (p ? "" : " empty") + (p && !p.on ? " off" : "") + (p && p.ready ? " ready" : "");
       if (!p) { li.textContent = "Aguardando jogador…"; }
       else {
-        const infos = (p.roles || []).map((id) => C.hi && C.hi.roles[id]).filter(Boolean);
+        const infos = (isFixed(C.hi && C.hi.levels[r.level]) ? [C.hi.roles[Object.keys(C.hi.roles)[i]]] : (p.roles || []).map((id) => C.hi && C.hi.roles[id])).filter(Boolean);
         const b = document.createElement("b"); b.textContent = p.name + (i === C.you ? " (você)" : "");
         const s = document.createElement("span");
         s.textContent = [i === r.host ? "👑 anfitrião" : "", infos.length ? infos.map((x) => `${x.icon} ${x.name}`).join(" + ") : "sem papel", p.on ? (p.ready ? "✔ pronto" : "aguardando ficar pronto") : "⚠ desconectado"].filter(Boolean).join(" · ");
@@ -409,8 +415,12 @@
       list.appendChild(li);
     });
     const rolesEl = $("co-roles"); rolesEl.textContent = "";
-    $("co-roles-note").textContent = "Cada jogador escolhe 1 poder (toque de novo para soltar).";
-    for (const id of Object.keys(C.hi ? C.hi.roles : {})) {
+    const lvNow = C.hi && C.hi.levels[r.level], fixedNow = isFixed(lvNow);
+    const rid = C.hi ? Object.keys(C.hi.roles) : [];
+    $("co-roles-note").textContent = fixedNow
+      ? "Nesta fase os poderes são fixos, por ordem de entrada: " + r.players.slice(0, size).map((p, i) => `${p ? p.name : "jogador " + (i + 1)} ${C.hi.roles[rid[i]].icon} ${C.hi.roles[rid[i]].name}`).join(" · ") + "."
+      : "Cada jogador escolhe 1 poder (toque de novo para soltar).";
+    for (const id of (fixedNow ? [] : Object.keys(C.hi ? C.hi.roles : {}))) {
       const info = C.hi.roles[id], have = mineRoles.includes(id);
       const takenBy = r.players.findIndex((p, i) => p && i !== C.you && (p.roles || []).includes(id));
       const b = document.createElement("button");
@@ -427,15 +437,20 @@
     const sel = $("co-level");
     if (C.hi) {
       sel.textContent = "";
-      C.hi.levels.forEach((l, i) => {
-        const o = document.createElement("option"); o.value = i;
-        const need = l.min || 1;
-        o.textContent = `${l.id}. ${l.name} (${l.time}s)` + (need > 1 ? ` · ${need}+ jogadores` : "");
-        o.disabled = need > size; sel.appendChild(o);
+      SETS.forEach(([key, label]) => {
+        const grp = document.createElement("optgroup"); grp.label = label;
+        C.hi.levels.forEach((l, i) => {
+          if ((l.set || "classic") !== key) return;
+          const o = document.createElement("option"); o.value = i;
+          o.textContent = `${l.id}. ${l.name} · ${levelNeed(l)}`;
+          o.disabled = !levelOk(l, size); grp.appendChild(o);
+        });
+        sel.appendChild(grp);
       });
     }
     sel.value = r.level; sel.disabled = !isHost();
-    $("co-level-note").textContent = isHost() ? "" : "Só o anfitrião escolhe a fase.";
+    const curL = C.hi && C.hi.levels[r.level];
+    $("co-level-note").textContent = (curL ? `Esta fase é para ${levelNeed(curL)}. ` : "") + (isHost() ? "" : "Só o anfitrião escolhe a fase.");
     renderLimit(r);
     const seated = r.players.slice(0, size);
     const meP = r.players[C.you], myReady = !!(meP && meP.ready);
@@ -444,8 +459,8 @@
     const missing = seated.filter((p) => !p).length;
     if (missing) why = `Faltam ${missing} jogador${missing > 1 ? "es" : ""}. Mande o código ${r.code}.`;
     else if (seated.some((p) => !p.on)) why = "Um jogador está desconectado.";
-    else if (seated.some((p) => (p.roles || []).length !== 1)) why = "Cada jogador precisa escolher 1 poder (🔥 💧 🌿).";
-    else if (C.hi && C.hi.levels[r.level] && (C.hi.levels[r.level].min || 1) > size) why = `Essa fase precisa de ${C.hi.levels[r.level].min} jogadores.`;
+    else if (curL && !levelOk(curL, size)) why = isFixed(curL) ? `Essa fase é só para exatamente ${curL.players} jogadores (esta sala tem ${size}). Escolha outra fase ou mude a quantidade.` : `Essa fase precisa de ${curL.min} jogadores.`;
+    else if (!isFixed(curL) && seated.some((p) => (p.roles || []).length !== 1)) why = "Cada jogador precisa escolher 1 poder (🔥 💧 🌿).";
     else if (seated.some((p) => !p.ready)) why = `Aguardando ficar pronto: ${seated.filter((p) => !p.ready).map((p) => p.name).join(", ")}.`;
     const start = $("co-start");
     start.classList.toggle("hidden", !isHost());
@@ -490,7 +505,7 @@
       d.style.setProperty("--rc", roleOf(i).color);
       box.appendChild(d);
     }
-    $("co-lvname").textContent = C.level ? `Fase ${C.level.id}: ${C.level.name}` : "";
+    $("co-lvname").textContent = C.level ? `${SET_TAG[C.level.set] || ""}Fase ${C.level.id}: ${C.level.name}` : "";
     $("co-hint").textContent = C.level ? C.level.hint : "";
     updateChips();
   }
@@ -568,6 +583,16 @@
     $("co-marks").appendChild(b);
   });
   $("co-canvas").addEventListener("pointerdown", (e) => {
+    if (C.view === "game" && C.armed < 0 && C.level) {            // toque/clique num mecanismo mostra a ligação dele por alguns segundos
+      const r0 = $("co-canvas").getBoundingClientRect(); if (r0.width) {
+        const x = (e.clientX - r0.left) / r0.width * W, y = (e.clientY - r0.top) / r0.height * H, lv = C.level;
+        let best = null, bd = 34;
+        lv.plates.forEach((p, pi) => { const d = Math.hypot(p.x - x, p.y - y); if (d < bd) { bd = d; best = lv.gates.findIndex((g) => g.plates.includes(pi)); } });
+        lv.gates.forEach((g, gi) => { const d = Math.hypot(g.r[0] + g.r[2] / 2 - x, g.r[1] + g.r[3] / 2 - y); if (d < bd + 8 || (x >= g.r[0] - 10 && x <= g.r[0] + g.r[2] + 10 && y >= g.r[1] - 10 && y <= g.r[1] + g.r[3] + 10)) { bd = Math.min(bd, d); best = gi; } });
+        if (best != null && best >= 0) C.sel = { gi: best, until: performance.now() + 4000 };
+      }
+      return;
+    }
     if (C.armed < 0 || C.view !== "game") return;
     const r = $("co-canvas").getBoundingClientRect(); if (!r.width) return;
     e.preventDefault();
@@ -652,12 +677,21 @@
     for (let y = 0; y <= H; y += 40) { ctx.moveTo(0, y); ctx.lineTo(W, y); }
     ctx.stroke();
     const t = localElapsed(now);
-    // ligações placa -> porta (fracas)
+    // ligações placa -> porta: discretas por padrão; ficam fortes quando você chega perto do mecanismo ou toca nele
+    const me = C.shown[C.you], selOn = C.sel && now < C.sel.until;
     lv.gates.forEach((g, gi) => {
       const gx = g.r[0] + g.r[2] / 2, gy = g.r[1] + g.r[3] / 2;
-      ctx.strokeStyle = GATE_COL[gi % GATE_COL.length]; ctx.globalAlpha = 0.3; ctx.lineWidth = 2; ctx.setLineDash([4, 6]);
+      let strong = !!(selOn && C.sel.gi === gi);
+      if (!strong && me) strong = Math.hypot(me.x - gx, me.y - gy) < 90 || g.plates.some((pi) => Math.hypot(me.x - lv.plates[pi].x, me.y - lv.plates[pi].y) < 70);
+      ctx.strokeStyle = GATE_COL[gi % GATE_COL.length]; ctx.globalAlpha = strong ? 0.95 : 0.1; ctx.lineWidth = strong ? 3 : 2; ctx.setLineDash(strong ? [10, 6] : [4, 6]);
+      if (strong && !RM()) ctx.lineDashOffset = -(now / 40) % 16;
       g.plates.forEach((pi) => { const p = lv.plates[pi]; ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(gx, gy); ctx.stroke(); });
-      ctx.setLineDash([]); ctx.globalAlpha = 1;
+      ctx.setLineDash([]); ctx.lineDashOffset = 0; ctx.globalAlpha = 1;
+      if (strong) {   // anéis nos extremos da ligação
+        ctx.lineWidth = 2; ctx.globalAlpha = 0.8; ctx.beginPath(); ctx.arc(gx, gy, 16 + (RM() ? 0 : 3 * Math.sin(now / 160)), 0, 7); ctx.stroke();
+        g.plates.forEach((pi) => { const p = lv.plates[pi]; ctx.beginPath(); ctx.arc(p.x, p.y, 26, 0, 7); ctx.stroke(); });
+        ctx.globalAlpha = 1;
+      }
     });
     // paredes
     ctx.fillStyle = "#26225e"; ctx.strokeStyle = "#5a54c0"; ctx.lineWidth = 2;
@@ -793,7 +827,11 @@
       const c = Math.max(0, s.c - (now - C.snapAt) / 1000);
       ctx.fillStyle = "rgba(7,6,15,.45)"; ctx.fillRect(0, 0, W, H);
       ctx.fillStyle = "#19f0ff"; ctx.font = "bold 120px 'Trebuchet MS', sans-serif"; ctx.fillText(String(Math.max(1, Math.ceil(c))), W / 2, H / 2);
-      ctx.font = "bold 20px sans-serif"; ctx.fillStyle = "#e9e7ff"; ctx.fillText("Preparem-se! Ajudem-se para chegar à porta.", W / 2, H / 2 + 80);
+      ctx.font = "bold 22px 'Trebuchet MS', sans-serif"; ctx.fillStyle = "#ffd23f"; ctx.fillText(`${SET_TAG[C.level.set] || ""}${C.level.name}`, W / 2, H / 2 + 70);
+      ctx.font = "bold 16px sans-serif"; ctx.fillStyle = "#e9e7ff";
+      const words = String(C.level.intro || C.level.hint || "").split(" "); let line = "", ly = H / 2 + 98;
+      for (const w of words) { const t2 = line ? line + " " + w : w; if (ctx.measureText(t2).width > W - 120 && line) { ctx.fillText(line, W / 2, ly); ly += 21; line = w; } else line = t2; }
+      if (line) ctx.fillText(line, W / 2, ly);
     } else if (now - C.goFlash < 700) {
       ctx.globalAlpha = 1 - (now - C.goFlash) / 700; ctx.fillStyle = "#39ff88"; ctx.font = "bold 90px 'Trebuchet MS', sans-serif"; ctx.fillText("VAI!", W / 2, H / 2); ctx.globalAlpha = 1;
     }
@@ -826,7 +864,7 @@
     const ld = $("co-load");
     if (!s || s.ph === "wait") {
       const waiting = s && s.ld ? s.ld.map((v, i) => (v ? null : name(i))).filter(Boolean) : [];
-      ld.textContent = waiting.length ? "Preparando a fase… aguardando " + waiting.join(", ") : "Preparando a fase…"; ld.classList.remove("hidden");
+      ld.textContent = (C.level ? `${SET_TAG[C.level.set] || ""}${C.level.name}\n${C.level.intro || ""}\n\n` : "") + (waiting.length ? "Preparando a fase… aguardando " + waiting.join(", ") : "Preparando a fase…"); ld.classList.remove("hidden");
     } else ld.classList.add("hidden");
     // HUD em texto
     const lim = limitOf(), left = Math.max(0, lim - t);
