@@ -438,3 +438,7 @@ body:not(.touch) #co-bottom { justify-content: center; } body:not(.touch) .co-ac
 #co-marks button { min-height: 40px; padding: 0 10px; border-radius: 10px; border: 2px solid #3a3680; background: #1a1740; color: var(--text, #e9e7ff); font-size: 13px; font-weight: 700; touch-action: manipulation; }
 #co-marks button.armed { border-color: var(--gold); background: rgba(255, 210, 63, .18); color: var(--gold); }
 #co-load { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; text-align: center; background: rgba(7, 6, 15, .78); z-index: 2; padding: 12px; font-weight: 700; font-size: 18px; color: var(--cyan); }
+/* lobby: os botões (Estou pronto / Começar / Sair) ficam SEMPRE visíveis na base da tela, mesmo em telas baixas */
+#co-lobby .panel { overflow: visible; max-height: none; }
+#co-lobby .ov-actions { position: sticky; bottom: -8px; z-index: 4; background: var(--panel, #12102a); padding: 10px 0 8px; margin-top: 10px; border-top: 1px solid #3a3680; display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+#co-lobby .ov-actions .btn { min-height: 44px; }
