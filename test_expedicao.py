@@ -122,7 +122,7 @@ async def main():
             check(f"{label}: modo expedição visível para todos", all(c.room["mode"] == "exp" for c in cl))
             for c in cl: c.send(t="ready", v=True)
             await asyncio.sleep(0.3); h.send(t="start"); await asyncio.sleep(1.0)
-            check(f"{label}: começa na fase 1 de 6", h.level and h.level["exp"] == {"step": 1, "total": 6, "id": seq["id"]}, h.level and h.level["exp"])
+            check(f"{label}: começa na fase 1 de 6 (Capítulo 1, Normal)", h.level and h.level["exp"]["step"] == 1 and h.level["exp"]["total"] == 6 and h.level["exp"]["id"] == seq["id"] and h.level["exp"]["chapter"] == 1 and h.level["exp"]["diff"] == "normal", h.level and h.level["exp"])
             stop = asyncio.Event()
             for c in cl: c.no_confirm = True              # na 1ª transição quem confirma é o teste (para provar que nada avança sozinho)
             tasks = [asyncio.ensure_future(robot(c, k, results_all, stop)) for k, c in enumerate(cl)]

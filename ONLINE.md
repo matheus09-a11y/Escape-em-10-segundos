@@ -96,3 +96,21 @@ Não há contas nem moderação: quem tem o código entra na sala (3 vagas).
   tudo (versão, sequência, modalidade, tempo, fases e totais) e recusa o que for antigo/incompatível. A fase pendente recomeça do começo (sem posições).
   O progresso também fica na memória da sala enquanto ela existir (queda de alguém não perde a expedição). Novos participantes podem entrar: o
   checkpoint pertence à expedição e não comprova que cada pessoa jogou as fases anteriores.
+
+## Dificuldade, mapas novos II e capítulos da Expedição
+
+- **Dificuldade** (fácil / normal / difícil): escolha do anfitrião no lobby, **independente do tempo por tentativa** (o tempo continua sendo dele;
+  25 s é só o recomendado). Todos veem antes de ficar prontos; mudar dificuldade, tempo, modalidade, capítulo ou mapa desfaz o "pronto"; nada
+  disso muda durante uma tentativa. O servidor escolhe e distribui a variante; todos recebem o mesmo mapa, os mesmos drones/lasers/mecanismos.
+- **Mapas novos II**: 12 famílias (6 de Dupla: Passagem alternada, Duas alas, Transporte por portais, Janela segura, Patrulha cruzada, Fuga
+  encadeada; 6 de Trio: Duas placas e um caminho, Corrente de três, Central de controle, Encontro por portais, Patrulhas coordenadas, Grande fuga),
+  cada uma com 3 variantes escritas à mão (`coop_maps_v2.py`). Os 56 mapas do catálogo continuam com `players` exato; os 20 anteriores são todos
+  **Normal** (equilíbrio preservado) e só existem nessa dificuldade.
+- **Portais e drones** foram portados da campanha (mesmas regras: portal destrava ao sair da área de chegada; drone patrulha uma rota em laço e mata
+  qualquer um) para `coop_sim.py` e desenhados em `coop.js`; a previsão local não prevê portais (a posição é corrigida na hora quando o servidor teletransporta).
+- **Expedição em capítulos**: Capítulo 1 = as sequências antigas (6 fases, só Normal; ids e versões preservados, então os checkpoints antigos
+  continuam valendo). Capítulo 2 = os mapas novos II, na dificuldade escolhida. Modalidade, capítulo, dificuldade e tempo ficam fixos durante a sequência.
+- **Checkpoint v2** (`{v:2, seq:{id,ver}, mod, diff, limit, next, stats}`) e v1 (antigo, sem dificuldade) migrado como Normal. Continua só com a
+  mesma modalidade, capítulo, dificuldade e tempo; validação completa no servidor. Guardado no navegador do anfitrião.
+- **Recordes e conclusões** (navegador, `dez-segundos-online-recordes-v1`): separados por modalidade + dificuldade + tempo por tentativa; a tela de
+  resultado mostra a configuração e compara só com a mesma configuração. Não existia progresso cooperativo antigo; o progresso da campanha não é tocado.

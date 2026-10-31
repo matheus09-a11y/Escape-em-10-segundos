@@ -28,6 +28,8 @@ SAW_SLACK = 3
 COUNTDOWN = 3.0
 START_SLOTS = {1: [1], 2: [0, 2], 3: [0, 1, 2]}   # quais pontos de largada cada tamanho de sala usa
 LOSE_PAUSE = 2.2
+PORTAL_R = 18            # área de ativação do portal (centro do jogador) — igual à campanha (engine.js)
+PORTAL_EXIT = PORTAL_R + PLAYER_R   # distância para "sair" da área de chegada e o portal destravar
 WARN = 0.5
 
 
@@ -47,6 +49,35 @@ def laser_state(l, t):
     if p >= l["off"] - WARN:
         return 1
     return 0
+
+
+_DRONE_CACHE = {}
+
+
+def _drone_prep(d):
+    k = id(d)
+    c = _DRONE_CACHE.get(k)
+    if c is None:
+        pts = [(float(p[0]), float(p[1])) for p in d["route"]]
+        cum = [0.0]
+        for i in range(len(pts)):
+            a, b = pts[i], pts[(i + 1) % len(pts)]
+            cum.append(cum[i] + math.hypot(b[0] - a[0], b[1] - a[1]))
+        c = _DRONE_CACHE[k] = (pts, cum, cum[-1])
+    return c
+
+
+def drone_pos(d, t):
+    """Drone de patrulha (mesma regra da campanha): percorre a rota em laço fechado a `speed` u/s; só depende do tempo da tentativa."""
+    pts, cum, per = _drone_prep(d)
+    s = ((t * d.get("speed", 100) + d.get("phase", 0) * per) % per + per) % per
+    i = 0
+    while i < len(pts) - 1 and s >= cum[i + 1]:
+        i += 1
+    a, b = pts[i], pts[(i + 1) % len(pts)]
+    ln = (cum[i + 1] - cum[i]) or 1.0
+    k = (s - cum[i]) / ln
+    return a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k
 
 
 def saw_pos(m, t):
@@ -80,6 +111,7 @@ class Sim:
         idx = list(range(self.n)) if len(lv["starts"]) == self.n else START_SLOTS[self.n]     # fases novas trazem uma largada por jogador
         self.pos = [[float(lv["starts"][k][0]), float(lv["starts"][k][1])] for k in idx]
         self.esc = [False] * self.n
+        self.lock = [None] * self.n          # portal em que o jogador acabou de chegar: só reativa depois que ele sair da área
         self.has_key = False
         self.latched = [False] * len(lv["plates"])
         self.pressed = [False] * len(lv["plates"])
@@ -194,6 +226,9 @@ class Sim:
             ux, uy = self.inp[i]
             if ux or uy:
                 self._move(self.pos[i], ux * SPEED * dt, uy * SPEED * dt, closed)
+        # 1b) portais (iguais aos da campanha): entrar leva ao outro; fica travado até sair da área de chegada
+        for i in range(self.n):
+            self._portals(i)
         # 2) placas (segurar) e interruptores (ficam ligados); vários jogadores na mesma placa não alternam nada
         for k, pl in enumerate(lv["plates"]):
             on = any(math.hypot(self.pos[i][0] - pl["x"], self.pos[i][1] - pl["y"]) < PLATE_R for i in range(self.n))
@@ -243,6 +278,28 @@ class Sim:
             self.t = self.limit
             return self._lose(-1, "time")
 
+    def _portals(self, i):
+        pt = self.lv.get("portals")
+        if not pt:
+            return
+        pos = self.pos[i]
+        lk = self.lock[i]
+        if lk is not None:
+            p = pt[lk[0]][lk[1]]
+            if math.hypot(pos[0] - p["x"], pos[1] - p["y"]) > PORTAL_EXIT:
+                self.lock[i] = lk = None
+        for k, pr in enumerate(pt):
+            for end, other in (("a", "b"), ("b", "a")):
+                if lk is not None and lk == (k, end):
+                    continue
+                p = pr[end]
+                if math.hypot(pos[0] - p["x"], pos[1] - p["y"]) < PORTAL_R:
+                    d = pr[other]
+                    pos[0], pos[1] = float(d["x"]), float(d["y"])
+                    self.lock[i] = (k, other)
+                    self.events.append(("tp", i, k))
+                    return
+
     def _hazard(self, i):
         lv = self.lv
         immune = {ROLES[r]["immune"] for r in self.roles[i] if r in ROLES}
@@ -257,6 +314,11 @@ class Sim:
                     r = l["r"]
                     if circle_rect(px, py, PLAYER_R, [r[0] + LASER_INSET, r[1] + LASER_INSET, r[2] - 2 * LASER_INSET, r[3] - 2 * LASER_INSET]):
                         return "laser"
+        for dr in lv.get("drones", ()):      # drones matam qualquer um (nenhum papel é imune)
+            dx, dy = drone_pos(dr, self.t)
+            rr = PLAYER_R + dr.get("r", 12)
+            if (px - dx) ** 2 + (py - dy) ** 2 < rr * rr:
+                return "drone"
         if "saw" not in immune:
             for m in lv["saws"]:
                 sx, sy = saw_pos(m, self.t)

@@ -364,44 +364,103 @@ for src, starts, nm, par in _DUO_VARIANTS:
               "mid": LEVELS[src]["mid"] + "-duo", "family": LEVELS[src]["mid"], "variant_of": LEVELS[src]["mid"], "set": "classic", "group": "classic"})
     v["id"] = len(LEVELS) + 1
     LEVELS.append(v)
+# Todos os mapas anteriores são da dificuldade NORMAL (equilíbrio preservado).
+for lv in LEVELS:
+    lv.update({"diff": "normal", "guide": False, "chapter": 0})
+
+# ---- Mapas novos II (12 famílias x 3 dificuldades), escritos em coop_maps_v2.py
+from coop_maps_v2 import build_v2, DIFFS
+_V2 = build_v2(globals())
+V2_PAR = {'duo-n1-easy': 5, 'duo-n1-normal': 5, 'duo-n1-hard': 6, 'duo-n2-easy': 3, 'duo-n2-normal': 4, 'duo-n2-hard': 4, 'duo-n3-easy': 4, 'duo-n3-normal': 4, 'duo-n3-hard': 7, 'duo-n4-easy': 6, 'duo-n4-normal': 6, 'duo-n4-hard': 10, 'duo-n5-easy': 6, 'duo-n5-normal': 6, 'duo-n5-hard': 6, 'duo-n6-easy': 6, 'duo-n6-normal': 7, 'duo-n6-hard': 7, 'trio-n1-easy': 5, 'trio-n1-normal': 5, 'trio-n1-hard': 5, 'trio-n2-easy': 7, 'trio-n2-normal': 7, 'trio-n2-hard': 7, 'trio-n3-easy': 9, 'trio-n3-normal': 9, 'trio-n3-hard': 9, 'trio-n4-easy': 4, 'trio-n4-normal': 4, 'trio-n4-hard': 4, 'trio-n5-easy': 9, 'trio-n5-normal': 10, 'trio-n5-hard': 9, 'trio-n6-easy': 6, 'trio-n6-normal': 6, 'trio-n6-hard': 6}   # menor tempo (s) do robô cuidadoso perfeito em cada variante (test_fases2.py), arredondado para cima
+for v in _V2:
+    v.update({"fixed": True, "roles": ROLE_IDS[:v["players"]], "min": v["players"], "par": V2_PAR[v["mid"]], "group": "new2", "intro": v["hint"],
+              "variant_of": None, "chapter": 2})
+    v["id"] = len(LEVELS) + 1
+    LEVELS.append(v)
 for lv in LEVELS:
     lv["modality"] = "duo" if lv["players"] == 2 else "trio"
 
 BY_MID = {lv["mid"]: i for i, lv in enumerate(LEVELS)}
-# ordem de exibição e de "próxima fase" por modalidade (classicas primeiro, depois as novas)
-ORDER = {2: [BY_MID[k] for k in ("classic-1-duo", "classic-2-duo", "classic-3-duo", "duo-1", "duo-2", "duo-3", "duo-4", "duo-5", "duo-6")],
-         3: [BY_MID[k] for k in ("classic-1", "classic-2", "classic-3", "classic-4", "classic-5", "trio-1", "trio-2", "trio-3", "trio-4", "trio-5", "trio-6")]}
+FAMILY = {}
+for i, lv in enumerate(LEVELS):
+    FAMILY.setdefault(lv["family"], {})[lv["diff"]] = i
 
-# EXPEDIÇÃO: 6 fases da modalidade, em ordem de dificuldade crescente (mecânicas usadas + tempo do robô perfeito)
+# ordem de exibição por modalidade (clássicos, novos I, novos II); a lista final depende da dificuldade
+_ORDER_BASE = {2: ["classic-1-duo", "classic-2-duo", "classic-3-duo", "duo-1", "duo-2", "duo-3", "duo-4", "duo-5", "duo-6"] + [f"duo-n{k}" for k in range(1, 7)],
+               3: ["classic-1", "classic-2", "classic-3", "classic-4", "classic-5", "trio-1", "trio-2", "trio-3", "trio-4", "trio-5", "trio-6"] + [f"trio-n{k}" for k in range(1, 7)]}
+DIFF_NAMES = {"easy": "Fácil", "normal": "Normal", "hard": "Difícil"}
+
+
+def _resolve(key, diff):
+    """chave (mid de mapa antigo ou família nova) -> índice da variante da dificuldade; None se não existir nessa dificuldade."""
+    if key in BY_MID:                       # mapa antigo (só existe em Normal)
+        i = BY_MID[key]
+        return i if LEVELS[i]["diff"] == diff else None
+    return FAMILY.get(key, {}).get(diff)
+
+
+def maps_for(n, diff="normal"):
+    """Índices dos mapas de EXATAMENTE n jogadores, na variante da dificuldade (lista vazia se não houver)."""
+    out = []
+    for key in _ORDER_BASE.get(n, []):
+        i = _resolve(key, diff)
+        if i is not None and LEVELS[i]["players"] == n:
+            out.append(i)
+    return out
+
+
+def variant_of_family(i, diff):
+    """Dado um mapa, devolve a variante da mesma família na dificuldade pedida (ou None)."""
+    return FAMILY.get(LEVELS[i]["family"], {}).get(diff)
+
+
+ORDER = {2: maps_for(2, "normal"), 3: maps_for(3, "normal")}
+
+# EXPEDIÇÕES por capítulo. Capítulo 1 = sequências antigas (6 fases, só Normal, ids/versões preservados para os checkpoints antigos).
+# Capítulo 2 = os mapas novos II, na dificuldade escolhida.
 EXPEDITIONS = {
-    2: {"id": "expedicao-dupla", "ver": 1, "mids": ["duo-1", "duo-2", "duo-4", "duo-3", "duo-6", "duo-5"]},
-    3: {"id": "expedicao-trio", "ver": 1, "mids": ["trio-1", "trio-3", "trio-2", "trio-6", "trio-4", "trio-5"]},
+    (2, 1): {"id": "expedicao-dupla", "ver": 1, "chapter": 1, "keys": ["duo-1", "duo-2", "duo-4", "duo-3", "duo-6", "duo-5"], "title": "Capítulo 1 — Clássico"},
+    (3, 1): {"id": "expedicao-trio", "ver": 1, "chapter": 1, "keys": ["trio-1", "trio-3", "trio-2", "trio-6", "trio-4", "trio-5"], "title": "Capítulo 1 — Clássico"},
+    (2, 2): {"id": "expedicao2-dupla", "ver": 1, "chapter": 2, "keys": ["duo-n1", "duo-n2", "duo-n3", "duo-n5", "duo-n4", "duo-n6"], "title": "Capítulo 2 — Novas fases"},
+    (3, 2): {"id": "expedicao2-trio", "ver": 1, "chapter": 2, "keys": ["trio-n1", "trio-n2", "trio-n4", "trio-n3", "trio-n5", "trio-n6"], "title": "Capítulo 2 — Novas fases"},
 }
-for _n, _e in EXPEDITIONS.items():
-    _e["maps"] = [BY_MID[k] for k in _e["mids"]]
-    assert all(LEVELS[i]["players"] == _n for i in _e["maps"]) and len(_e["maps"]) == 6
+
+
+def exp_maps(n, chap, diff):
+    """Índices dos 6 mapas da expedição (n jogadores, capítulo, dificuldade); None se o capítulo não existe nessa dificuldade."""
+    e = EXPEDITIONS.get((n, chap))
+    if not e:
+        return None
+    ids = [_resolve(k, diff) for k in e["keys"]]
+    if any(i is None or LEVELS[i]["players"] != n for i in ids):
+        return None
+    return ids
+
+
+for _k, _e in EXPEDITIONS.items():
+    assert exp_maps(_k[0], _k[1], "normal") is not None and len(_e["keys"]) == 6
 
 
 def public(lv):
     """O que o cliente precisa para desenhar a fase (cópia sem nada interno)."""
-    keys = ("id", "mid", "name", "time", "min", "par", "set", "group", "players", "modality", "fixed", "roles", "intro", "hint", "starts", "walls", "spikes", "lasers", "saws", "plates", "gates", "key", "door")
+    keys = ("id", "mid", "name", "time", "min", "par", "set", "group", "players", "modality", "fixed", "roles", "intro", "hint", "starts", "walls", "spikes", "lasers", "saws", "drones", "portals", "plates", "gates", "key", "door", "diff", "guide", "family", "chapter")
     return {k: lv.get(k) for k in keys}
 
 
-def compatible(lv, n):
-    """O mapa serve para uma sala de n jogadores? Só se foi feito para EXATAMENTE n."""
-    return lv["players"] == n
-
-
-def maps_for(n):
-    """Índices dos mapas da modalidade de n jogadores, na ordem de exibição (lista vazia se não houver)."""
-    return list(ORDER.get(n, []))
+def compatible(lv, n, diff=None):
+    """O mapa serve para uma sala de n jogadores (e, se informado, para a dificuldade)? Só se foi feito para EXATAMENTE n."""
+    return lv["players"] == n and (diff is None or lv["diff"] == diff)
 
 
 def catalog():
     return [{"id": lv["id"], "mid": lv["mid"], "name": lv["name"], "time": lv["time"], "min": lv["min"], "par": lv["par"], "set": lv["set"],
-             "group": lv["group"], "players": lv["players"], "fixed": lv["fixed"], "modality": lv["modality"], "family": lv["family"], "variant_of": lv["variant_of"]} for lv in LEVELS]
+             "group": lv["group"], "players": lv["players"], "fixed": lv["fixed"], "modality": lv["modality"], "family": lv["family"],
+             "variant_of": lv["variant_of"], "diff": lv["diff"]} for lv in LEVELS]
 
 
 def sequences():
-    return {str(n): {"id": e["id"], "ver": e["ver"], "mids": e["mids"], "maps": e["maps"]} for n, e in EXPEDITIONS.items()}
+    out = {}
+    for (n, chap), e in EXPEDITIONS.items():
+        out[f"{n}-{chap}"] = {"id": e["id"], "ver": e["ver"], "chapter": chap, "title": e["title"], "keys": e["keys"],
+                              "maps": {d: exp_maps(n, chap, d) for d in DIFFS}}
+    return out

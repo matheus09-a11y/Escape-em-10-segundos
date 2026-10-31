@@ -99,7 +99,7 @@ async def main():
         print("WebSocket e salas")
         a, b, c = WS(), WS(), WS()
         for x in (a, b, c): check("handshake 101", await x.connect())
-        hi = await a.expect("hi"); cat = hi["levels"]; BYMID = {x["mid"]: k for k, x in enumerate(cat)}; check("hello traz catálogo de fases e papéis", hi and len(hi["levels"]) == 20 and set(hi["roles"]) == {"brasa", "onda", "folha"})
+        hi = await a.expect("hi"); cat = hi["levels"]; BYMID = {x["mid"]: k for k, x in enumerate(cat)}; check("hello traz catálogo de fases e papéis", hi and len(hi["levels"]) == 56 and set(hi["roles"]) == {"brasa", "onda", "folha"})
         b.send(t="join", code="ZZZZ", name="x"); e = await b.expect("err"); check("sala inexistente dá erro", e and "não encontrada" in e["msg"])
         a.send(t="create", name="Ana", skin="robot"); j = await a.expect("joined"); check("criar sala devolve código de 4 letras", j and len(j["code"]) == 4 and j["you"] == 0)
         code = j["code"]
@@ -213,7 +213,7 @@ async def main():
         check("virou Dupla: todos veem a nova modalidade", p1.room["size"] == 2 and p2.room["size"] == 2 and "Dupla" in p2.room["modality"], p2.room)
         check("o mapa de Trio escolhido foi desmarcado (nunca fica um mapa da outra modalidade)", p1.room["level"] is None and p2.room["level"] is None, p1.room["level"])
         check("o 'pronto' de todos foi invalidado", not any(p["ready"] for p in p1.room["players"] if p), p1.room["players"])
-        check("a lista de mapas da sala só tem mapas de 2 jogadores (igual para todos)", p1.room["maps"] == p2.room["maps"] and all(cat[i]["players"] == 2 for i in p1.room["maps"]) and len(p1.room["maps"]) == 9, p1.room["maps"])
+        check("a lista de mapas da sala só tem mapas de 2 jogadores (igual para todos)", p1.room["maps"] == p2.room["maps"] and all(cat[i]["players"] == 2 for i in p1.room["maps"]) and len(p1.room["maps"]) == 15, p1.room["maps"])
         p1.send(t="start"); e = await p1.expect("err"); check("sem mapa escolhido não começa", e and "Escolha um mapa" in e["msg"], e)
         p3b = WS(); await p3b.connect(); await p3b.expect("hi"); p3b.send(t="join", code=code2, name="Caio"); e = await p3b.expect("err"); check("terceiro é recusado: a Dupla tem 2 vagas", e and "cheia (2 jogadores)" in e["msg"], e)
         p3b.send(t="leave")
@@ -370,7 +370,7 @@ async def main():
 
         print("Conjuntos Dupla e Trio: exatamente 2 / 3 jogadores, papéis fixos, partida de ponta a ponta")
         cat = hi["levels"]
-        check("catálogo: 9 mapas de Dupla (2 jogadores) e 11 de Trio (3 jogadores), cada um com UMA quantidade exata", sum(1 for x in cat if x["players"] == 2) == 9 and sum(1 for x in cat if x["players"] == 3) == 11 and all(x["players"] in (2, 3) for x in cat))
+        check("catálogo: 27 entradas de Dupla (2 jogadores) e 29 de Trio (3 jogadores), cada uma com UMA quantidade exata", sum(1 for x in cat if x["players"] == 2) == 9 + 18 and sum(1 for x in cat if x["players"] == 3) == 11 + 18 and all(x["players"] in (2, 3) for x in cat))
         duo_i, trio_i = BYMID["duo-1"], BYMID["trio-1"]
         g = [WS() for _ in range(3)]
         for x in g: await x.connect(); await x.expect("hi")

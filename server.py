@@ -24,7 +24,7 @@ import struct
 import sys
 import time
 
-from coop_levels import LEVELS, ROLES, ROLE_IDS, SKIN_IDS, EXPEDITIONS, BY_MID, public, catalog, compatible, maps_for, sequences
+from coop_levels import LEVELS, ROLES, ROLE_IDS, SKIN_IDS, EXPEDITIONS, BY_MID, DIFF_NAMES, public, catalog, compatible, maps_for, variant_of_family, exp_maps, sequences
 from coop_sim import Sim
 
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -49,6 +49,7 @@ LIMIT_MIN, LIMIT_MAX = 5, 300
 SIZES = (2, 3)               # modalidades: Dupla (2) e Trio (3)
 MODALITY = {2: "Dupla — 2 jogadores", 3: "Trio — 3 jogadores"}
 EXP_STEPS = 6
+DIFFS = ("easy", "normal", "hard")
 LOAD_TIMEOUT = 20.0          # quanto esperamos todos carregarem a fase antes de voltar ao lobby
 MARK_GAP = 1.2               # intervalo mínimo entre marcações de um mesmo jogador
 WIN_HOLD = 2.0               # tempo mostrando "escaparam" antes de ir sozinho para a próxima fase
@@ -202,10 +203,12 @@ class Slot:
 
 
 class Exp:
-    """Progresso de uma EXPEDIÇÃO (6 fases da modalidade, em ordem). Só muda nas transições (derrota, vitória, reinício): nunca por quadro."""
-    def __init__(self, n, limit):
-        self.n, self.limit = n, limit
-        self.seq = EXPEDITIONS[n]
+    """Progresso de uma EXPEDIÇÃO (6 fases da modalidade, em ordem). Fixa modalidade, capítulo, dificuldade e tempo durante a sequência.
+    Só muda nas transições (derrota, vitória, reinício): nunca por quadro."""
+    def __init__(self, n, limit, chap=1, diff="normal"):
+        self.n, self.limit, self.chap, self.diff = n, limit, chap, diff
+        self.seq = EXPEDITIONS[(n, chap)]
+        self.maps = exp_maps(n, chap, diff)       # None = esse capítulo não existe nessa dificuldade
         self.step = 0               # fase atual/pendente (0..5); 6 = concluída
         self.per = []               # resultado de cada fase vencida: {"mid", "time", "defeats"}
         self.defeats = 0
@@ -213,21 +216,25 @@ class Exp:
         self.cur_defeats = 0        # derrotas na fase atual
         self.restored = False       # veio de um checkpoint
 
+    def available_(self):
+        return self.maps is not None
+
     def has_progress(self):
         return self.step > 0 or self.defeats > 0 or self.active > 0
 
     def current_map(self):
-        return self.seq["maps"][self.step] if self.step < EXP_STEPS else None
+        return self.maps[self.step] if self.maps and self.step < EXP_STEPS else None
 
     def stats(self):
         return {"active": round(self.active, 2), "defeats": self.defeats, "done": self.step, "per": [dict(x) for x in self.per]}
 
     def pub(self):
-        return {"id": self.seq["id"], "ver": self.seq["ver"], "step": self.step, "total": EXP_STEPS, "mids": self.seq["mids"], "maps": self.seq["maps"],
+        return {"id": self.seq["id"], "ver": self.seq["ver"], "chapter": self.chap, "title": self.seq["title"], "diff": self.diff, "available": self.maps is not None,
+                "step": self.step, "total": EXP_STEPS, "mids": [LEVELS[i]["mid"] for i in self.maps] if self.maps else [], "maps": self.maps or [],
                 "stats": self.stats(), "restored": self.restored, "progress": self.has_progress()}
 
     def checkpoint(self):
-        return {"v": 1, "seq": {"id": self.seq["id"], "ver": self.seq["ver"]}, "mod": self.n, "limit": self.limit, "next": self.step,
+        return {"v": 2, "seq": {"id": self.seq["id"], "ver": self.seq["ver"]}, "mod": self.n, "diff": self.diff, "limit": self.limit, "next": self.step,
                 "stats": self.stats(), "saved": int(time.time())}
 
 
@@ -235,34 +242,46 @@ def _num(x, lo, hi):
     return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) and lo <= x <= hi
 
 
-def validate_ckpt(ck, n, limit):
-    """Valida um checkpoint ANTES de usá-lo. Devolve (Exp, None) ou (None, motivo)."""
+def validate_ckpt(ck, n, limit, diff="normal", chap=1):
+    """Valida um checkpoint ANTES de usá-lo. Devolve (Exp, None) ou (None, motivo).
+    Versão 1 (anterior à dificuldade) é migrada com segurança: vale como NORMAL."""
     if not isinstance(ck, dict):
         return None, "Checkpoint inválido."
-    if ck.get("v") != 1:
+    v = ck.get("v")
+    if v not in (1, 2):
         return None, "Checkpoint de uma versão antiga ou desconhecida: não dá para continuar por ele."
-    e = EXPEDITIONS.get(n)
+    cdiff = ck.get("diff", "normal") if v == 2 else "normal"          # v1 não tinha dificuldade: era sempre Normal
     seq = ck.get("seq")
-    if e is None or not isinstance(seq, dict) or seq.get("id") != e["id"] or ck.get("mod") != n:
+    found = next(((k, e) for k, e in EXPEDITIONS.items() if isinstance(seq, dict) and seq.get("id") == e["id"]), None)
+    if found is None or ck.get("mod") != n or found[0][0] != n:
         return None, "Esse checkpoint é de outra expedição ou de outra modalidade (Dupla × Trio)."
+    (_, cchap), e = found
     if seq.get("ver") != e["ver"]:
         return None, "A sequência da expedição foi atualizada: esse checkpoint não vale mais."
+    if cchap != chap:
+        return None, f"Esse checkpoint é do {e['title']}. Escolha esse capítulo para continuar."
+    if cdiff != diff:
+        return None, f"Esse checkpoint é da dificuldade {DIFF_NAMES.get(cdiff, cdiff)} e a sala está em {DIFF_NAMES[diff]}. Ajuste a dificuldade para continuar."
     if ck.get("limit") != limit:
         return None, f"Esse checkpoint é de uma expedição com {ck.get('limit')} s por fase e a sala está com {limit} s. Ajuste o tempo para continuar."
     nxt = ck.get("next")
     if not (isinstance(nxt, int) and not isinstance(nxt, bool) and 1 <= nxt < EXP_STEPS):
         return None, "O checkpoint não tem uma fase pendente (a expedição já terminou ou ainda não começou)."
+    maps = exp_maps(n, cchap, diff)
+    if maps is None:
+        return None, "Esse capítulo não existe nessa dificuldade."
+    mids = [LEVELS[i]["mid"] for i in maps]
     st = ck.get("stats")
     if not isinstance(st, dict) or not isinstance(st.get("per"), list) or len(st["per"]) != nxt or st.get("done") != nxt:
         return None, "Checkpoint com estatísticas inconsistentes."
     tot_def, tot_time = 0, 0.0
     for i, it in enumerate(st["per"]):
-        if not isinstance(it, dict) or it.get("mid") != e["mids"][i] or not _num(it.get("time"), 0, limit + 1) or not (isinstance(it.get("defeats"), int) and not isinstance(it.get("defeats"), bool) and 0 <= it["defeats"] <= 999):
+        if not isinstance(it, dict) or it.get("mid") != mids[i] or not _num(it.get("time"), 0, limit + 1) or not (isinstance(it.get("defeats"), int) and not isinstance(it.get("defeats"), bool) and 0 <= it["defeats"] <= 999):
             return None, "Checkpoint com fases que não batem com a sequência."
         tot_def += it["defeats"]; tot_time += it["time"]
     if not (isinstance(st.get("defeats"), int) and not isinstance(st.get("defeats"), bool)) or st["defeats"] != tot_def or not _num(st.get("active"), tot_time - 0.5, 100000):
         return None, "Checkpoint com totais que não batem."
-    x = Exp(n, limit)
+    x = Exp(n, limit, chap, diff)
     x.step, x.per, x.defeats, x.active, x.restored = nxt, [{"mid": it["mid"], "time": float(it["time"]), "defeats": it["defeats"]} for it in st["per"]], tot_def, float(st["active"]), True
     return x, None
 
@@ -274,7 +293,9 @@ class Room:
         self.size = 3             # MODALIDADE = capacidade: 2 (Dupla) ou 3 (Trio), escolhida pelo anfitrião
         self.host = 0
         self.mode = "free"        # "free" (mapa avulso) | "exp" (expedição de 6 fases)
-        self.level = maps_for(3)[0]   # mapa avulso escolhido (None = nenhum compatível/escolhido)
+        self.difficulty = "normal"   # fácil | normal | difícil (independente do tempo)
+        self.chapter = 1             # capítulo da expedição (1 = clássico, 2 = novas fases)
+        self.level = maps_for(3, "normal")[0]   # mapa avulso escolhido (None = nenhum compatível/escolhido)
         self.exp = None           # Exp da modalidade e do tempo atuais
         self.transit = None       # tela de resultado entre fases da expedição (aguardando "pronto para continuar")
         self.rid = 0
@@ -304,7 +325,7 @@ class Room:
     def state(self):
         return {
             "t": "room", "code": self.code, "host": self.host, "size": self.size, "modality": MODALITY[self.size], "limit": self.limit, "level": self.level,
-            "mode": self.mode, "exp": self.exp.pub() if self.exp else None, "maps": maps_for(self.size),
+            "mode": self.mode, "exp": self.exp.pub() if self.exp else None, "maps": maps_for(self.size, self.difficulty), "difficulty": self.difficulty, "diff_name": DIFF_NAMES[self.difficulty], "chapter": self.chapter,
             "transit": ({"rid": self.transit["rid"], "c": sorted(self.transit["confirmed"]), "final": self.transit["final"]} if self.transit else None),
             "phase": self.phase, "paused": self.paused,
             "players": [None if s is None else {"name": s.name, "roles": s.roles, "skin": s.skin, "ready": s.ready, "on": bool(s.conn and s.conn.alive)} for s in self.slots],
@@ -351,12 +372,14 @@ class Room:
             return f"{MODALITY[self.size]}: precisamos de exatamente {need} conectados."
         idx = self.target()
         if idx is None:
+            if self.mode == "exp" and self.exp and not self.exp.available_():
+                return f"O {self.exp.seq['title']} não existe na dificuldade {DIFF_NAMES[self.difficulty]}. Escolha o Capítulo 2 ou a dificuldade Normal."
             if self.mode == "exp" and self.exp and self.exp.step >= EXP_STEPS:
                 return "Essa expedição já terminou: recomece do início."
             return "Escolha um mapa ou a Expedição."
         lv = LEVELS[idx]
-        if not compatible(lv, self.size):     # defesa final: nunca começa um mapa da outra modalidade
-            return f"Esse mapa é para exatamente {lv['players']} jogadores e a sala é {MODALITY[self.size]}."
+        if not compatible(lv, self.size, self.difficulty):     # defesa final: nunca começa mapa de outra modalidade nem de outra dificuldade
+            return f"Esse mapa é para exatamente {lv['players']} jogadores, dificuldade {DIFF_NAMES[lv['diff']]}; a sala é {MODALITY[self.size]}, {DIFF_NAMES[self.difficulty]}."
         if not lv["fixed"] and any(len(x.roles) != 1 for x in ss):
             return "Cada jogador precisa escolher 1 poder."
         if any(not x.ready for x in ss):
@@ -373,7 +396,7 @@ class Room:
         self.paused = False
         self.won_at = None
         idx = self.target()
-        if idx is None or not compatible(LEVELS[idx], self.size):      # nunca inicia mapa incompatível, mesmo que alguém tente
+        if idx is None or not compatible(LEVELS[idx], self.size, self.difficulty):      # nunca inicia mapa incompatível, mesmo que alguém tente
             self.phase = "lobby"
             return self.stop_game("Esse mapa não serve para esta modalidade.")
         self.level = idx
@@ -395,7 +418,7 @@ class Room:
                 s.inp, s.inp_t = (0.0, 0.0), 0.0
         lv_pub = dict(public(lv), time=self.limit)    # o tempo mostrado é o da sala, não o da fase
         self.broadcast({"t": "level", "level": lv_pub, "n": self.level, "total": len(LEVELS), "roles": [s.roles for s in self.slots[:self.size]], "size": self.size, "limit": self.limit,
-                        "exp": ({"step": self.exp.step + 1, "total": EXP_STEPS, "id": self.exp.seq["id"]} if self.mode == "exp" and self.exp else None)})
+                        "exp": ({"step": self.exp.step + 1, "total": EXP_STEPS, "id": self.exp.seq["id"], "chapter": self.exp.chap, "title": self.exp.seq["title"], "diff": self.exp.diff} if self.mode == "exp" and self.exp else None), "diff": lv["diff"], "difficulty": self.difficulty})
         self.push_state()
         if self.task:
             self.task.cancel()
@@ -403,22 +426,22 @@ class Room:
 
     def advance(self):
         """Mapa avulso: depois da vitória segue para o próximo mapa da MESMA modalidade (ou encerra). A expedição usa a tela de resultado."""
-        lst = maps_for(self.size)
+        lst = maps_for(self.size, self.difficulty)
         nxt = None
         if self.level in lst:
             k = lst.index(self.level) + 1
             nxt = lst[k] if k < len(lst) else None
-        if nxt is not None and compatible(LEVELS[nxt], self.size):
+        if nxt is not None and compatible(LEVELS[nxt], self.size, self.difficulty):
             self.level = nxt
             self.start_game()
         else:
-            self.stop_game(f"Vocês zeraram todos os mapas de {MODALITY[self.size]}! 🏆")
+            self.stop_game(f"Vocês zeraram todos os mapas de {MODALITY[self.size]} ({DIFF_NAMES[self.difficulty]})! 🏆")
 
     def notice(self, msg):
         self.broadcast({"t": "notice", "msg": msg})
 
     def new_exp(self):
-        self.exp = Exp(self.size, self.limit)
+        self.exp = Exp(self.size, self.limit, self.chapter, self.difficulty)
 
     def begin_transit(self):
         """Venceu uma fase da expedição: contabiliza UMA vez, mostra o resultado e espera todos confirmarem."""
@@ -432,10 +455,10 @@ class Room:
         self.transit = {"rid": self.rid, "confirmed": set(), "final": final}
         nxt = LEVELS[e.current_map()]["name"] if not final else None
         self.broadcast({"t": "result", "rid": self.rid, "a": sim.attempt, "final": final, "step": e.step, "total": EXP_STEPS, "time": res["time"], "defeats": res["defeats"],
-                        "stats": e.stats(), "next": nxt, "limit": self.limit, "modality": MODALITY[self.size]})
+                        "stats": e.stats(), "next": nxt, "limit": self.limit, "modality": MODALITY[self.size], "diff": self.difficulty, "diff_name": DIFF_NAMES[self.difficulty], "chapter": e.chap, "title": e.seq["title"], "seq": e.seq["id"]})
         host = self.slots[self.host]
         if host and host.conn and host.conn.alive:      # o checkpoint é guardado no navegador do anfitrião (somente nas transições)
-            host.conn.send({"t": "ckpt", "c": None if final else e.checkpoint(), "mod": self.size, "limit": self.limit, "done": final})
+            host.conn.send({"t": "ckpt", "c": None if final else e.checkpoint(), "mod": self.size, "limit": self.limit, "diff": self.difficulty, "seq": e.seq["id"], "done": final})
         self.push_state()
 
     def go_next(self):
@@ -650,7 +673,7 @@ def handle(conn, m):
             old.close()
         conn.send({"t": "joined", "code": r.code, "you": idx, "token": r.slots[idx].token, "back": True})
         if r.phase == "playing" and r.sim:
-            conn.send({"t": "level", "level": public(LEVELS[r.level]), "n": r.level, "exp": ({"step": r.exp.step + 1, "total": EXP_STEPS, "id": r.exp.seq["id"]} if r.mode == "exp" and r.exp else None), "total": len(LEVELS), "roles": [s.roles for s in r.slots[:r.size]], "size": r.size})
+            conn.send({"t": "level", "level": public(LEVELS[r.level]), "n": r.level, "exp": ({"step": r.exp.step + 1, "total": EXP_STEPS, "id": r.exp.seq["id"], "chapter": r.exp.chap, "title": r.exp.seq["title"], "diff": r.exp.diff} if r.mode == "exp" and r.exp else None), "total": len(LEVELS), "roles": [s.roles for s in r.slots[:r.size]], "size": r.size})
             if all(s and s.conn and s.conn.alive for s in r.slots[:r.size]):
                 r.paused = False
                 r.sim.resume_count(2.0)
@@ -730,7 +753,7 @@ def handle(conn, m):
             if x:
                 x.roles = []
         msgs = [f"Modalidade: {MODALITY[n]}."]
-        if room.level is not None and not compatible(LEVELS[room.level], n):
+        if room.level is not None and not compatible(LEVELS[room.level], n, room.difficulty):
             room.level = None                              # mapa da outra modalidade: limpa a seleção
             msgs.append("O mapa escolhido era da outra modalidade e foi desmarcado.")
         if room.exp and room.exp.has_progress():
@@ -738,6 +761,43 @@ def handle(conn, m):
         room.new_exp()                                     # expedição sempre da modalidade e do tempo atuais
         room.notice(" ".join(msgs))
         room.push_state()
+    elif t == "diff":
+        # DIFICULDADE (fácil/normal/difícil): independente do tempo; só o anfitrião, só fora de uma tentativa
+        if conn.slot != room.host or room.phase != "lobby":
+            return
+        v = m.get("v")
+        if v not in DIFFS:
+            return err(conn, "A dificuldade é fácil, normal ou difícil.")
+        if v == room.difficulty:
+            return
+        room.difficulty = v
+        room.reset_ready()
+        msgs = [f"Dificuldade: {DIFF_NAMES[v]} (o tempo por tentativa continua {room.limit} s)."]
+        if room.level is not None:
+            nv = variant_of_family(room.level, v)       # a MESMA fase na nova dificuldade, se existir
+            if nv is not None and compatible(LEVELS[nv], room.size, v):
+                room.level = nv
+            else:
+                room.level = None
+                msgs.append("O mapa escolhido só existe em outra dificuldade e foi desmarcado (os mapas clássicos só existem em Normal).")
+        if room.exp and room.exp.has_progress():
+            msgs.append("Mudar a dificuldade recomeça a expedição (resultados de dificuldades diferentes não se misturam).")
+        room.new_exp()
+        room.notice(" ".join(msgs))
+        room.push_state()
+    elif t == "chapter":
+        if conn.slot != room.host or room.phase != "lobby":
+            return
+        v = m.get("v")
+        if v not in (1, 2):
+            return
+        if v != room.chapter:
+            room.chapter = v
+            room.reset_ready()
+            room.new_exp()
+            if room.exp.maps is None:
+                room.notice(f"O {room.exp.seq['title']} só existe na dificuldade Normal.")
+            room.push_state()
     elif t == "mode":
         if conn.slot != room.host or room.phase != "lobby":
             return
@@ -745,7 +805,7 @@ def handle(conn, m):
         if v not in ("free", "exp"):
             return
         room.mode = v
-        if v == "exp" and (room.exp is None or room.exp.n != room.size or room.exp.limit != room.limit):
+        if v == "exp" and (room.exp is None or room.exp.n != room.size or room.exp.limit != room.limit or room.exp.diff != room.difficulty or room.exp.chap != room.chapter):
             room.new_exp()
         room.reset_ready()
         room.push_state()
@@ -767,11 +827,11 @@ def handle(conn, m):
         elif a_ == "continue":
             ck = m.get("ck")
             if ck is None:
-                if room.exp and room.exp.has_progress() and room.exp.step < EXP_STEPS and room.exp.n == room.size and room.exp.limit == room.limit:
+                if room.exp and room.exp.has_progress() and room.exp.step < EXP_STEPS and room.exp.n == room.size and room.exp.limit == room.limit and room.exp.diff == room.difficulty and room.exp.chap == room.chapter:
                     room.mode = "exp"; room.reset_ready(); room.push_state()
                     return
                 return err(conn, "Não há expedição em andamento nesta sala. Use o checkpoint salvo neste navegador, se houver.")
-            x, why = validate_ckpt(ck, room.size, room.limit)
+            x, why = validate_ckpt(ck, room.size, room.limit, room.difficulty, room.chapter)
             if x is None:
                 return err(conn, why)
             room.exp, room.mode = x, "exp"
@@ -808,8 +868,13 @@ def handle(conn, m):
             idx = m["id"] - 1
         if idx is None:
             return err(conn, "Mapa desconhecido.")
-        if not compatible(LEVELS[idx], room.size):
+        if LEVELS[idx]["players"] != room.size:
             return err(conn, f"Esse mapa é para exatamente {LEVELS[idx]['players']} jogadores e esta sala é {MODALITY[room.size]}. Escolha um mapa da lista da modalidade.")
+        if LEVELS[idx]["diff"] != room.difficulty:         # o servidor escolhe a variante da dificuldade da sala
+            nv = variant_of_family(idx, room.difficulty)
+            if nv is None:
+                return err(conn, f"Esse mapa só existe na dificuldade {DIFF_NAMES[LEVELS[idx]['diff']]}; a sala está em {DIFF_NAMES[room.difficulty]}.")
+            idx = nv
         room.level = idx
         room.mode = "free"
         room.reset_ready()
