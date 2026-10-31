@@ -3,7 +3,7 @@
 papéis errados precisam perder pelo motivo certo. Uso: python3 test_coop.py"""
 import math, sys
 from coop_levels import LEVELS, ROLE_IDS
-from coop_sim import Sim, laser_state, COUNTDOWN
+from coop_sim import Sim, laser_state, COUNTDOWN, LOSE_PAUSE
 
 DT = 1 / 60
 FAILS = []
@@ -172,16 +172,74 @@ for _ in range(int(6 / DT)):
 check("porta abre com a placa pressionada", sim.gate_open[0] and 200 < sim.pos[1][0] < 220, f"open={sim.gate_open} pos={sim.pos[1]}")
 sim.set_input(0, 1, 0)   # o segurador sai da placa
 for _ in range(30): sim.tick(DT)
-check("soltou a placa: porta fecha", not sim.gate_open[0])
-check("quem estava na porta é empurrado para fora (não fica preso nem morre)", sim.phase == "play" and not (200 - 11 < sim.pos[1][0] < 220 + 11), f"{sim.phase} {sim.pos[1]}")
+check("porta continua aberta enquanto alguém está na passagem", sim.gate_open[0] and sim.phase == "play", f"open={sim.gate_open} {sim.phase}")
+check("ninguém é esmagado nem empurrado: segue onde estava", abs(sim.pos[1][0] - 210) < 12, f"{sim.pos[1]}")
+sim.set_input(1, 1, 0)   # quem estava na porta atravessa e sai dela
+for _ in range(60): sim.tick(DT)
+sim.set_input(1, 0, 0)
+for _ in range(10): sim.tick(DT)
+check("saiu da passagem e a placa está solta: a porta fecha", not sim.gate_open[0] and sim.phase == "play", f"open={sim.gate_open} pos={sim.pos[1]}")
+ev = [e for e in sim.events if e[0] == "gate"]
+check("a porta gerou um único fecha (sem piscar)", sum(1 for e in ev if e[0] == "gate" and e[2] is False) == 1, ev)
 
-# escapados não seguram placa
+# dois jogadores na mesma placa não alternam nada; sair de uma placa atualiza a porta
 sim = mk(3)
 for _ in range(int(COUNTDOWN / DT) + 2): sim.tick(DT)
-sim.pos[0] = [100.0, 120.0]; sim.tick(DT)
-check("placa ativa com alguém em cima", sim.pressed[0])
-sim.esc[0] = True; sim.tick(DT)
-check("quem escapou não segura a placa", not sim.pressed[0])
+sim.pos[0] = [100.0, 120.0]; sim.pos[1] = [104.0, 124.0]; sim.tick(DT)
+check("dois na mesma placa: ativa uma vez, porta aberta", sim.pressed[0] and sim.gate_open[0])
+sim.events.clear(); sim.tick(DT); sim.tick(DT)
+check("dois na mesma placa: nenhum evento novo (sem alternância)", not [e for e in sim.events if e[0] in ("plate", "gate")], sim.events)
+sim.pos[0] = [300.0, 400.0]; sim.tick(DT)
+check("um sai e o outro continua: placa segue ativa", sim.pressed[0] and sim.gate_open[0])
+sim.pos[1] = [300.0, 420.0]; sim.tick(DT)
+check("os dois saíram: placa e porta desligam", not sim.pressed[0] and not sim.gate_open[0])
+
+# interruptor (trava) fica ligado até o fim da tentativa, mesmo depois de sair de cima
+sim = mk(3)
+for _ in range(int(COUNTDOWN / DT) + 2): sim.tick(DT)
+sim.pos[2] = [480.0, 70.0]; sim.tick(DT); sim.pos[2] = [300.0, 400.0]; sim.tick(DT)
+check("interruptor continua ligado depois de sair de cima", sim.latched[1] and sim.gate_open[1])
+
+# saída em área: vence com a chave e TODOS dentro ao mesmo tempo; ninguém some
+sim = mk(1)
+for _ in range(int(COUNTDOWN / DT) + 2): sim.tick(DT)
+d = LEVELS[0]["door"]
+sim.pos = [[d[0] - 30.0, d[1] + 30.0], [d[0], d[1]], [d[0] + 30.0, d[1] - 30.0]]; sim.has_key = True; sim.tick(DT)
+check("três jogadores em lugares diferentes da área de saída vencem (sem sobreposição exata)", sim.phase == "won", f"{sim.phase} esc={sim.esc}")
+sim = mk(1)
+for _ in range(int(COUNTDOWN / DT) + 2): sim.tick(DT)
+sim.pos = [[d[0], d[1]], [d[0], d[1]], [d[0] - 200.0, d[1]]]; sim.has_key = True; sim.tick(DT)
+check("faltando um jogador na saída: não vence", sim.phase == "play" and sum(sim.esc) == 2 and sim.snapshot()["in"] == 2)
+sim.pos[2] = [d[0] + 20.0, d[1]]; sim.tick(DT)
+check("completando a saída: vence", sim.phase == "won")
+sim = mk(1)
+for _ in range(int(COUNTDOWN / DT) + 2): sim.tick(DT)
+sim.pos = [[d[0], d[1]]] * 3; sim.tick(DT)
+check("sem a chave a saída não vale", sim.phase == "play")
+sim = mk(1)
+for _ in range(int(COUNTDOWN / DT) + 2): sim.tick(DT)
+sim.has_key = True; sim.pos = [[d[0], d[1]], [d[0], d[1]], [d[0] - 100.0, d[1]]]; sim.tick(DT)
+sim.pos[0] = [d[0] - 100.0, d[1]]; sim.tick(DT)
+check("quem já esteve na saída e saiu volta a ficar fora da contagem", sim.snapshot()["in"] == 1 and sim.phase == "play")
+
+# tempo configurável: o limite escolhido manda, e reiniciar restaura o mesmo limite
+sim = Sim(LEVELS[0], list(ROLE_IDS), limit=10)
+for _ in range(int((COUNTDOWN + 10.3) / DT)): sim.tick(DT)
+check("limite de 10 s: tempo esgota em 10 s", sim.phase == "lost" and sim.result["why"] == "time" and abs(sim.t - 10) < 0.02, f"{sim.phase} {sim.t}")
+for _ in range(int((LOSE_PAUSE + 0.5) / DT)): sim.tick(DT)
+check("depois da derrota reinicia com o mesmo limite de 10 s", sim.attempt == 2 and sim.limit == 10 and sim.snapshot()["lim"] == 10 and sim.phase == "count")
+sim = Sim(LEVELS[0], list(ROLE_IDS), limit=300)
+check("limite máximo de 300 s aceito pela simulação", sim.snapshot()["lim"] == 300)
+sim = Sim(LEVELS[0], list(ROLE_IDS), limit=25, wait=True)
+for _ in range(120): sim.tick(DT)
+check("enquanto espera todos carregarem o tempo não corre", sim.phase == "wait" and sim.t == 0 and sim.count == 3.0)
+sim.begin()
+for _ in range(int(COUNTDOWN / DT) + 2): sim.tick(DT)
+check("depois do begin: contagem de 3 s e só então o tempo corre", sim.phase == "play" and sim.t < 0.1)
+# um único evento de derrota por tentativa
+sim = Sim(LEVELS[0], list(ROLE_IDS), limit=5)
+for _ in range(int((COUNTDOWN + 7) / DT)): sim.tick(DT)
+check("tempo esgotado gera um só evento de derrota por tentativa", sum(1 for e in sim.events if e[0] == "lose") == 1, [e for e in sim.events if e[0] == "lose"])
 
 # entrada maliciosa
 sim = mk(1)

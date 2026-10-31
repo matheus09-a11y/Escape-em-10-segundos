@@ -117,8 +117,13 @@
             <div id="co-roles" class="co-roles" role="radiogroup" aria-label="Papéis"></div>
             <label class="co-field"><span>Fase</span><select id="co-level" aria-describedby="co-level-note"></select></label>
             <p id="co-level-note" class="notes"></p>
+            <div class="co-h">Tempo por fase</div>
+            <div id="co-limit" class="co-sizes co-limits" role="radiogroup" aria-label="Tempo por fase"></div>
+            <div class="co-custom"><label for="co-limit-num">Outro valor (5 a 300 s)</label><input id="co-limit-num" type="number" min="5" max="300" step="1" inputmode="numeric"><button id="co-limit-set" class="btn btn-ghost" type="button">Usar</button></div>
+            <p id="co-limit-note" class="notes" role="status"></p>
             <p id="co-start-note" class="notes" role="status"></p>
             <div class="ov-actions">
+              <button id="co-ready" class="btn btn-ghost" aria-pressed="false">✔ Estou pronto</button>
               <button id="co-start" class="btn">Começar ▶</button>
               <button id="co-leave" class="btn btn-ghost">Sair da sala</button>
             </div>
@@ -128,9 +133,10 @@
           <div id="co-hud">
             <div class="co-h1"><b id="co-lvname"></b><span id="co-att"></span><span id="co-ping"></span></div>
             <div class="co-h2"><span id="co-timer">--</span><span class="bar"><i id="co-bar"></i></span><span id="co-key"></span></div>
+            <div class="co-h3"><span id="co-exit"></span></div>
             <div id="co-chips"></div>
           </div>
-          <div id="co-cwrap"><div id="co-banner2" role="status" aria-live="polite"></div><canvas id="co-canvas" aria-label="Área do jogo cooperativo. Use as setas ou WASD para andar; teclas 1 a 6 enviam mensagens rápidas."></canvas><div id="co-result" class="hidden"></div></div>
+          <div id="co-cwrap"><div id="co-banner2" role="status" aria-live="polite"></div><canvas id="co-canvas" aria-label="Área do jogo cooperativo. Use as setas ou WASD para andar; teclas 1 a 6 enviam mensagens rápidas."></canvas><div id="co-result" class="hidden"></div><div id="co-load" class="hidden" role="status"></div></div>
           <div id="co-hint"></div>
           <div id="co-bottom">
             <div id="co-pad" aria-label="Controles de direção">
@@ -139,6 +145,7 @@
               <button class="dir right" data-k="r" aria-label="Direita">▶</button>
               <button class="dir down" data-k="d" aria-label="Baixo">▼</button>
             </div>
+            <div id="co-marks" aria-label="Marcações rápidas no mapa"></div>
             <div id="co-emos" aria-label="Mensagens rápidas"></div>
             <div class="co-acts"><button id="co-restart" class="btn btn-ghost">↻ Reiniciar</button><button id="co-menu" class="btn btn-ghost">☰ Menu</button></div>
           </div>

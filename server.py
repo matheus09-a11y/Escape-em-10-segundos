@@ -40,6 +40,10 @@ GRACE_LOBBY = 15.0
 GRACE_PLAY = 30.0
 INPUT_STALE = 0.8            # entrada de direção sem renovar por tanto tempo vira "parado"
 TICK = 1 / 60
+DEFAULT_LIMIT = 25           # segundos por tentativa (o anfitrião muda no lobby: 5 a 300)
+LIMIT_MIN, LIMIT_MAX = 5, 300
+LOAD_TIMEOUT = 20.0          # quanto esperamos todos carregarem a fase antes de voltar ao lobby
+MARK_GAP = 1.2               # intervalo mínimo entre marcações de um mesmo jogador
 WIN_HOLD = 2.0               # tempo mostrando "escaparam" antes de ir sozinho para a próxima fase
 CODE_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ"
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -124,6 +128,7 @@ class Conn:
         self.tok_t = time.monotonic()
         self.last_emo = 0.0
         self.cerr = 0
+        self.last_mark = 0.0
 
     def send(self, obj):
         if not self.alive:
@@ -174,6 +179,8 @@ class Slot:
         self.idx, self.name, self.conn = idx, name, conn
         self.roles = []             # com menos de 3 jogadores, um jogador pode acumular papéis
         self.skin = "explorer"
+        self.ready = False          # "estou pronto" no lobby
+        self.loaded = False         # já carregou a fase atual (só vale durante a espera)
         self.token = secrets.token_urlsafe(12)
         self.dropped = None          # instante da queda (None = conectado)
         self.inp = (0.0, 0.0)
@@ -192,6 +199,8 @@ class Room:
         self.task = None
         self.paused = False
         self.won_at = None
+        self.limit = DEFAULT_LIMIT   # tempo da tentativa, igual para todos (só o anfitrião muda, só no lobby)
+        self.load_t0 = None
         self.created = time.monotonic()
         self.empty_since = None
 
@@ -206,8 +215,8 @@ class Room:
 
     def state(self):
         return {
-            "t": "room", "code": self.code, "host": self.host, "size": self.size, "level": self.level, "phase": self.phase, "paused": self.paused,
-            "players": [None if s is None else {"name": s.name, "roles": s.roles, "skin": s.skin, "on": bool(s.conn and s.conn.alive)} for s in self.slots],
+            "t": "room", "code": self.code, "host": self.host, "size": self.size, "limit": self.limit, "level": self.level, "phase": self.phase, "paused": self.paused,
+            "players": [None if s is None else {"name": s.name, "roles": s.roles, "skin": s.skin, "ready": s.ready, "on": bool(s.conn and s.conn.alive)} for s in self.slots],
         }
 
     def push_state(self):
@@ -247,18 +256,30 @@ class Room:
         need = LEVELS[self.level]["min"]
         if self.size < need:
             return f"Essa fase precisa de pelo menos {need} jogadores."
+        if any(not x.ready for x in ss):
+            return "Todos precisam estar prontos."
         return None
+
+    def reset_ready(self):
+        for x in self.slots:
+            if x:
+                x.ready = False
 
     def start_game(self):
         self.phase = "playing"
         self.paused = False
         self.won_at = None
         lv = LEVELS[self.level]
-        self.sim = Sim(lv, [s.roles for s in self.slots[:self.size]])
+        self.sim = Sim(lv, [s.roles for s in self.slots[:self.size]], limit=self.limit, wait=True)
+        self.load_t0 = time.monotonic()
+        for s in self.slots:
+            if s:
+                s.loaded = False
         for s in self.slots:
             if s:
                 s.inp, s.inp_t = (0.0, 0.0), 0.0
-        self.broadcast({"t": "level", "level": public(lv), "n": self.level, "total": len(LEVELS), "roles": [s.roles for s in self.slots[:self.size]], "size": self.size})
+        lv_pub = dict(public(lv), time=self.limit)    # o tempo mostrado é o da sala, não o da fase
+        self.broadcast({"t": "level", "level": lv_pub, "n": self.level, "total": len(LEVELS), "roles": [s.roles for s in self.slots[:self.size]], "size": self.size, "limit": self.limit})
         self.push_state()
         if self.task:
             self.task.cancel()
@@ -277,6 +298,7 @@ class Room:
         self.phase = "lobby"
         self.paused = False
         self.sim = None
+        self.reset_ready()
         if self.task:
             self.task.cancel()
             self.task = None
@@ -285,6 +307,21 @@ class Room:
                 s.inp = (0.0, 0.0)
         self.broadcast({"t": "stopped", "why": why or ""})
         self.push_state()
+
+    def snap(self):
+        """Estado autorizado + relógio do servidor: os clientes calculam o tempo restante pelo prazo (en), não por contadores próprios."""
+        sim = self.sim
+        m = sim.snapshot()
+        now = time.monotonic()
+        m["st"] = round(now, 3)
+        if sim.phase == "play":
+            m["en"] = round(now + max(0.0, sim.limit - sim.t), 3)
+        if sim.phase == "wait":
+            m["ld"] = [1 if (x and x.loaded) else 0 for x in self.slots[:self.size]]
+        return m
+
+    def all_loaded(self):
+        return all(x and x.loaded for x in self.slots[:self.size])
 
     async def run(self):
         sim = self.sim
@@ -305,11 +342,20 @@ class Room:
                     if s:
                         x, y = s.inp if now - s.inp_t < INPUT_STALE else (0.0, 0.0)
                         sim.set_input(i, x, y)
-                if self.paused:
-                    n += 1
-                    if n % 30 == 0:
-                        self.broadcast(sim.snapshot())
-                    continue
+                if sim.phase == "wait":
+                    # a fase é preparada em todos os navegadores antes da contagem; nenhum tempo corre enquanto isso
+                    if self.all_loaded():
+                        sim.begin()
+                        self.broadcast(self.snap())
+                    elif now - self.load_t0 > LOAD_TIMEOUT:
+                        slow = [x.name for x in self.slots[:self.size] if x and not x.loaded]
+                        self.stop_game("Não deu para carregar a fase em todos os navegadores (" + ", ".join(slow) + "). Tentem de novo.")
+                        return
+                    else:
+                        n += 1
+                        if n % 15 == 0:
+                            self.broadcast(self.snap())
+                        continue
                 before = sim.phase
                 if sim.phase == "won":
                     if self.won_at is None:
@@ -322,11 +368,12 @@ class Room:
                     self.won_at = None
                 sim.tick(TICK)
                 for ev in sim.events:
-                    self.broadcast({"t": "ev", "e": list(ev)})
+                    # cada evento leva o número da tentativa: quem recebe atrasado descarta o da tentativa anterior
+                    self.broadcast({"t": "ev", "a": ev[1] if ev[0] == "start" else sim.attempt, "e": list(ev)})
                 sim.events.clear()
                 n += 1
                 if n % 2 == 0 or sim.phase != before:
-                    self.broadcast(sim.snapshot())
+                    self.broadcast(self.snap())
         except asyncio.CancelledError:
             pass
         except Exception as e:  # nunca derrubar o servidor por causa de uma sala
@@ -394,7 +441,7 @@ def handle(conn, m):
         if not r:
             return err(conn, "Sala não encontrada. Confira o código.")
         if r.phase != "lobby":
-            return err(conn, "Essa sala já começou a jogar.")
+            return err(conn, "Essa sala está no meio de uma partida. Entre quando ela voltar para a sala.")
         i = r.free_slot()
         if i is None:
             return err(conn, f"A sala está cheia ({r.size} jogador{'es' if r.size > 1 else ''}).")
@@ -445,7 +492,41 @@ def handle(conn, m):
                 me.roles = [r]          # um poder por jogador: escolher outro troca o anterior
         else:
             return
+        me.ready = False
         room.push_state()
+    elif t == "limit":
+        if conn.slot != room.host or room.phase != "lobby":
+            return
+        v = m.get("v")
+        if isinstance(v, float) and v.is_integer():
+            v = int(v)
+        if not (isinstance(v, int) and not isinstance(v, bool) and LIMIT_MIN <= v <= LIMIT_MAX):
+            return err(conn, f"O tempo precisa ser um número inteiro entre {LIMIT_MIN} e {LIMIT_MAX} segundos.")
+        if v != room.limit:
+            room.limit = v
+            room.reset_ready()
+        room.push_state()
+    elif t == "ready":
+        if room.phase != "lobby":
+            return
+        me.ready = bool(m.get("v"))
+        room.push_state()
+    elif t == "loaded":
+        if room.phase == "playing" and room.sim and room.sim.phase == "wait":
+            me.loaded = True
+    elif t == "mark":
+        now = time.monotonic()
+        if room.phase != "playing" or not room.sim or now - conn.last_mark < MARK_GAP:
+            return
+        k = m.get("k")
+        try:
+            x, y = float(m.get("x", 0)), float(m.get("y", 0))
+        except (TypeError, ValueError):
+            return
+        if not (isinstance(k, int) and not isinstance(k, bool) and 0 <= k < 3 and math.isfinite(x) and math.isfinite(y)):
+            return
+        conn.last_mark = now
+        room.broadcast({"t": "mark", "s": conn.slot, "k": k, "x": round(max(0.0, min(800.0, x)), 1), "y": round(max(0.0, min(500.0, y)), 1)})
     elif t == "size":
         if conn.slot != room.host or room.phase != "lobby":
             return
@@ -455,6 +536,7 @@ def handle(conn, m):
         if any(room.slots[i] for i in range(n, 3)):
             return err(conn, "Há jogadores demais na sala para esse tamanho.")
         room.size = n
+        room.reset_ready()
         for x in room.slots:
             if x:
                 x.roles = []
@@ -476,6 +558,7 @@ def handle(conn, m):
             if LEVELS[n]["min"] > room.size:
                 return err(conn, f"Essa fase precisa de pelo menos {LEVELS[n]['min']} jogadores.")
             room.level = n
+            room.reset_ready()
             room.push_state()
     elif t == "start":
         if conn.slot != room.host or room.phase != "lobby":
@@ -501,9 +584,11 @@ def handle(conn, m):
             conn.last_emo = now
             room.broadcast({"t": "emo", "s": conn.slot, "k": k})
     elif t == "restart":
-        if conn.slot == room.host and room.phase == "playing" and room.sim:
+        a = m.get("a")
+        # só vale para a tentativa atual (um clique atrasado não reinicia a seguinte) e só com o jogo rodando
+        if conn.slot == room.host and room.phase == "playing" and room.sim and room.sim.phase in ("count", "play") and (a is None or a == room.sim.attempt):
             room.sim.reset()
-            room.broadcast(room.sim.snapshot())
+            room.broadcast(room.snap())
     elif t == "next":
         if conn.slot == room.host and room.phase == "playing" and room.sim and room.sim.phase == "won":
             room.advance()
@@ -523,9 +608,10 @@ def leave(conn, explicit=False):
     if idx is None or room.slots[idx] is None:
         return
     if explicit:
+        who = room.slots[idx].name
         room.slots[idx] = None
         if room.phase == "playing":
-            room.stop_game("Alguém saiu da sala.")
+            room.stop_game(f"{who} saiu da sala. A partida foi encerrada.")
         room.reassign_host()
         if not room.connected():
             drop_room(room)
@@ -537,8 +623,8 @@ def leave(conn, explicit=False):
     if s.conn is conn:
         s.conn, s.dropped = None, time.monotonic()
         if room.phase == "playing":
-            room.paused = True
-            room.broadcast({"t": "paused", "who": idx})
+            # ninguém vence nem joga com participante ausente: a tentativa é encerrada e o grupo volta ao lobby
+            room.stop_game(f"{s.name} desconectou. A partida foi encerrada e o grupo voltou para a sala.")
         room.reassign_host()
         room.push_state()
 
@@ -552,6 +638,7 @@ async def reaper():
                 if s and s.conn is None and s.dropped is not None:
                     if now - s.dropped > (GRACE_PLAY if room.phase == "playing" else GRACE_LOBBY):
                         room.slots[i] = None
+                        room.reset_ready()
                         if room.phase == "playing":
                             room.stop_game("Um jogador não voltou a tempo.")
                         room.reassign_host()

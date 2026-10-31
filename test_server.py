@@ -40,10 +40,12 @@ class WS:
                 m = json.loads(p)
                 t = m.get("t")
                 if t == "s": self.snap = m
-                elif t == "level": self.level = m
+                elif t == "level":
+                    self.level = m; self.levels_seen = getattr(self, "levels_seen", 0) + 1
+                    if not getattr(self, "noload", False): self.send(t="loaded")   # como um navegador de verdade: avisa que carregou
                 elif t == "room": self.room = m
                 elif t == "joined": self.you, self.token, self.code = m["you"], m["token"], m["code"]
-                elif t == "ev": self.events.append(m["e"])
+                elif t == "ev": self.events.append(m["e"]); self.evs = getattr(self, "evs", []) + [m]
                 await self.q.put(m)
         except Exception: pass
     async def expect(self, t, timeout=3):
@@ -101,6 +103,10 @@ async def main():
         b.send(t="start"); e = await b.expect("err", 0.5); check("só o anfitrião começa (silencioso)", e is None and (a.level is None))
         a.send(t="level", n=99); a.send(t="level", n="x"); await asyncio.sleep(0.1)
         check("fase inválida ignorada", a.room["level"] == 0)
+        a.send(t="start"); e = await a.expect("err"); check("não começa sem todos prontos", e and "prontos" in e["msg"], e)
+        for x in (a, b, c): x.send(t="ready", v=True)
+        await asyncio.sleep(0.2)
+        check("todos veem quem está pronto", all(p and p["ready"] for p in a.room["players"]), a.room)
         a.send(t="start"); await asyncio.sleep(0.5)
         check("todos recebem a fase ao começar", all(x.level and x.level["n"] == 0 for x in (a, b, c)))
         check("papéis chegam na ordem das vagas", a.level["roles"] == [["brasa"], ["onda"], ["folha"]])
@@ -156,15 +162,17 @@ async def main():
 
         print("Queda e volta")
         tok, sl = c.token, c.you
-        c.w.close(); await asyncio.sleep(0.4)
-        pz = await a.expect("paused", 1) or None
-        check("quando alguém cai o jogo pausa para todos", a.room and a.room["paused"] is True, a.room)
+        stop_before = len([1 for _ in [0]])
+        c.w.close(); await asyncio.sleep(0.5)
+        st = await a.expect("stopped", 1)
+        check("quando alguém cai a partida é encerrada e o grupo volta ao lobby com o motivo", st is not None and "desconectou" in st["why"] and a.room["phase"] == "lobby", st)
+        check("quem caiu aparece como desconectado e ninguém fica pronto", a.room["players"][2]["on"] is False and not any(p["ready"] for p in a.room["players"] if p), a.room)
+        a.send(t="start"); e = await a.expect("err"); check("não começa com participante ausente", e is not None and a.room["phase"] == "lobby", e)
         c2 = WS(); await c2.connect(); c2.send(t="rejoin", code=code, token="errado"); e = await c2.expect("err"); check("token errado não entra", e is not None)
         c3 = WS(); await c3.connect(); c3.send(t="rejoin", code=code, token=tok); j = await c3.expect("joined")
-        check("com o token volta para a mesma vaga", j and j["you"] == sl and j.get("back"))
-        await asyncio.sleep(0.4)
-        check("o jogo despausa quando todos voltam", a.room["paused"] is False and c3.level is not None, a.room)
-        a.send(t="lobby"); await asyncio.sleep(0.3); check("anfitrião volta ao lobby", a.room["phase"] == "lobby")
+        check("com o token volta para a mesma vaga (no lobby)", j and j["you"] == sl and j.get("back"))
+        await asyncio.sleep(0.3)
+        check("depois de voltar todos estão conectados no lobby", all(p and p["on"] for p in a.room["players"]) and a.room["phase"] == "lobby", a.room)
         b.send(t="leave"); await asyncio.sleep(0.3)
         check("quem sai libera a vaga", a.room["players"][1] is None)
         a.send(t="leave"); c3.send(t="leave"); await asyncio.sleep(0.3)
@@ -189,6 +197,7 @@ async def main():
         check("sem poder escolhido não começa", e and "1 poder" in e["msg"], e)
         p1.send(t="role", role="brasa"); await asyncio.sleep(0.15)
         p1.send(t="level", n=2); await asyncio.sleep(0.1); check("fase 3 (exige 2) liberada para 2 jogadores", p1.room["level"] == 2, p1.room)
+        p1.send(t="ready", v=True); p2.send(t="ready", v=True); await asyncio.sleep(0.15)
         p1.send(t="start"); await asyncio.sleep(0.5)
         check("começa com 2 jogadores e papéis por jogador", p1.level and p1.level["roles"] == [["brasa"], ["folha"]] and p1.level.get("size") == 2, p1.level)
         for _ in range(60):
@@ -201,9 +210,103 @@ async def main():
         p2.send(t="leave"); await asyncio.sleep(0.2)
         p1.send(t="size", n=1); await asyncio.sleep(0.2); check("sozinho, anfitrião define sala de 1", p1.room["size"] == 1 and p1.room["level"] != 2, p1.room)
         p1.send(t="role", role="onda"); await asyncio.sleep(0.2)
-        p1.send(t="level", n=0); p1.send(t="start"); await asyncio.sleep(0.5)
+        p1.send(t="level", n=0); p1.send(t="ready", v=True); await asyncio.sleep(0.1); p1.send(t="start"); await asyncio.sleep(0.5)
         check("começa sozinho com 1 poder", p1.level and p1.level["roles"] == [["onda"]], p1.level)
         for x in (p1, p2, p3): x.send(t="leave")
+        await asyncio.sleep(0.3)
+
+        print("Tempo configurável, prontos, carga sincronizada, tentativas e marcações (3 clientes)")
+        q = [WS() for _ in range(3)]
+        for x in q: await x.connect(); await x.expect("hi")
+        q[0].send(t="create", name="Ana"); j = await q[0].expect("joined"); code3 = j["code"]
+        for k in (1, 2): q[k].send(t="join", code=code3, name="P" + str(k)); await q[k].expect("joined")
+        await asyncio.sleep(0.2)
+        check("tempo padrão é 25 s e todos veem", all(x.room["limit"] == 25 for x in q), q[0].room)
+        q[1].send(t="limit", v=10); await asyncio.sleep(0.15); check("só o anfitrião altera o tempo", q[0].room["limit"] == 25)
+        for bad in (4, 301, 0, -5, "abc", None, 12.5, True, [10], 1e9):
+            q[0].send(t="limit", v=bad)
+        await asyncio.sleep(0.3)
+        errs = 0
+        while not q[0].q.empty():
+            m = q[0].q.get_nowait(); errs += 1 if m.get("t") == "err" else 0
+        check("tempos inválidos (fora de 5..300, texto, decimal, booleano) são recusados", q[0].room["limit"] == 25 and errs >= 8, (q[0].room["limit"], errs))
+        for v in (5, 10, 15, 20, 25, 30, 45, 60, 300, 137):
+            q[0].send(t="limit", v=v); await asyncio.sleep(0.05)
+            ok = q[0].room["limit"] == v and q[2].room["limit"] == v
+            if not ok: check(f"tempo {v} s aceito e visto por todos", False, q[2].room); break
+        else: check("5, 10, 15, 20, 25, 30, 45, 60, 137 e 300 s aceitos e todos veem o mesmo valor", True)
+        for k in range(3): q[k].send(t="role", role=["brasa", "onda", "folha"][k])
+        await asyncio.sleep(0.2)
+        for x in q: x.send(t="ready", v=True)
+        await asyncio.sleep(0.2)
+        check("todos prontos antes de mexer no tempo", all(p["ready"] for p in q[0].room["players"]))
+        q[0].send(t="limit", v=12); await asyncio.sleep(0.2)
+        check("mudar o tempo faz todos confirmarem 'pronto' de novo", not any(p["ready"] for p in q[0].room["players"]) and q[0].room["limit"] == 12, q[0].room)
+        q[0].send(t="limit", v=12); await asyncio.sleep(0.1)
+        for x in q: x.send(t="ready", v=True)
+        await asyncio.sleep(0.2)
+        # carga: o terceiro cliente demora a carregar -> nenhum tempo corre
+        q[2].noload = True
+        q[0].send(t="start"); await asyncio.sleep(0.8)
+        check("todos recebem a fase com o tempo da sala (12 s)", all(x.level and x.level["level"]["time"] == 12 and x.level["limit"] == 12 for x in q), q[0].level and q[0].level["limit"])
+        await asyncio.sleep(1.5)
+        check("sem todos carregados a fase fica em espera (sem contagem nem tempo)", q[0].snap["ph"] == "wait" and q[0].snap["e"] == 0 and q[0].snap["ld"] == [1, 1, 0], q[0].snap)
+        check("quem ainda carrega aparece para todos", q[1].snap["ld"] == [1, 1, 0])
+        q[2].send(t="loaded"); await asyncio.sleep(0.4)
+        check("depois que todos carregam começa a contagem de 3 s", q[0].snap["ph"] == "count", q[0].snap)
+        for _ in range(60):
+            if q[0].snap["ph"] == "play": break
+            await asyncio.sleep(0.1)
+        check("contagem termina e o jogo começa para todos no mesmo estado", all(x.snap["ph"] == "play" for x in q) and all(x.snap["lim"] == 12 for x in q), q[1].snap)
+        sn = [x.snap for x in q]
+        check("prazo compartilhado: 'en' (fim) igual para todos dentro de 1 quadro", abs(sn[0].get("en", 0) - sn[1].get("en", 0)) < 0.15 and abs(sn[0]["st"] - sn[2]["st"]) < 0.2, [(s_["st"], s_.get("en")) for s_ in sn])
+        check("o prazo corresponde ao limite (12 s)", abs((sn[0]["en"] - sn[0]["st"]) + sn[0]["e"] - 12) < 0.3, sn[0])
+        att = q[0].snap["a"]
+        q[1].send(t="restart", a=att); await asyncio.sleep(0.3)
+        check("só o anfitrião reinicia", q[0].snap["a"] == att)
+        q[0].send(t="restart", a=att + 7); await asyncio.sleep(0.3)
+        check("reinício com número de tentativa errado (atrasado) é ignorado", q[0].snap["a"] == att, q[0].snap["a"])
+        q[0].send(t="restart", a=att); await asyncio.sleep(0.4)
+        check("reiniciar vale uma vez e mantém o limite escolhido", q[0].snap["a"] == att + 1 and q[0].snap["lim"] == 12 and q[2].snap["lim"] == 12, q[0].snap)
+        q[0].send(t="restart", a=att); await asyncio.sleep(0.3)
+        check("o mesmo pedido repetido (da tentativa anterior) não reinicia de novo", q[0].snap["a"] == att + 1, q[0].snap["a"])
+        check("eventos levam o número da tentativa", all("a" in m for m in q[0].evs), q[0].evs[:3])
+        # tempo esgota: um único evento de derrota, e um único reinício
+        for _ in range(200):
+            if any(e[0] == "lose" and e[2] == "time" for e in q[0].events): break
+            await asyncio.sleep(0.1)
+        loses = [m for m in q[0].evs if m["e"][0] == "lose"]
+        check("tempo esgotado: exatamente uma derrota registrada", len(loses) == 1 and loses[0]["e"][2] == "time" and loses[0]["a"] == att + 1, loses)
+        await asyncio.sleep(3.0)
+        starts = [m for m in q[0].evs if m["e"][0] == "start"]
+        check("e exatamente um reinício depois dela (tentativa seguinte)", q[0].snap["a"] == att + 2 and sum(1 for m in starts if m["a"] == att + 2) == 1, (q[0].snap["a"], starts))
+        # marcações: tipos válidos, limite de frequência, posição limitada ao mapa
+        for x in q: x.events.clear(); x.evs = []
+        before = len([1 for _ in [0]])
+        q[1].send(t="mark", k=0, x=123.4, y=222); q[1].send(t="mark", k=1, x=1, y=1); await asyncio.sleep(0.3)
+        got = []
+        while not q[0].q.empty():
+            m = q[0].q.get_nowait()
+            if m.get("t") == "mark": got.append(m)
+        check("marcação chega a todos com autor, tipo e posição", len(got) == 1 and got[0]["s"] == 1 and got[0]["k"] == 0 and got[0]["x"] == 123.4, got)
+        check("marcações seguidas do mesmo jogador são limitadas (1 por ~1,2 s)", len(got) == 1)
+        await asyncio.sleep(1.3)
+        q[1].send(t="mark", k=2, x=99999, y=-50); q[1].send(t="mark", k=7, x=1, y=1); q[1].send(t="mark", k="x", x=1, y=1); await asyncio.sleep(0.3)
+        got = []
+        while not q[0].q.empty():
+            m = q[0].q.get_nowait()
+            if m.get("t") == "mark": got.append(m)
+        check("posição fora do mapa é limitada e tipos inválidos são ignorados", len(got) == 1 and got[0]["x"] == 800 and got[0]["y"] == 0, got)
+        # entrada tardia: sala em partida recusa, com mensagem clara
+        late = WS(); await late.connect(); await late.expect("hi"); late.send(t="join", code=code3, name="Atrasado"); e = await late.expect("err")
+        check("entrada tardia durante a partida é recusada com mensagem clara", e and "meio de uma partida" in e["msg"], e)
+        # vitória só com todos na saída (participantes fixos)
+        # (a vitória de verdade com 3 robôs já é testada acima)
+        # anfitrião sai: a sala continua com migração e a partida acaba com aviso
+        q[0].send(t="leave"); await asyncio.sleep(0.5)
+        st = await q[1].expect("stopped", 1)
+        check("anfitrião sai: a partida acaba com mensagem clara e outro vira anfitrião", st is not None and "saiu" in st["why"] and q[1].room["host"] in (1, 2), (st, q[1].room))
+        for x in q + [late]: x.send(t="leave")
         await asyncio.sleep(0.3)
 
         d = json.loads((await http("/health")).split(b"\r\n\r\n")[1]); print("         estado final:", d)

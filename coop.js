@@ -25,8 +25,11 @@
   const W = 800, H = 500;
   const GATE_COL = ["#19f0ff", "#ff3df2", "#ffd23f", "#39ff88", "#ff8a3d", "#b58cff"];
   const GATE_SYM = ["◆", "●", "▲", "■", "★", "✚"];
+  const EXIT_HALF = 36;   // a saída é uma área de 72x72 (igual ao servidor)
+  const PRESETS = [10, 15, 20, 25, 30, 45, 60];
+  const MARKS = [["📍", "Aqui!"], ["🆘", "Preciso de ajuda!"], ["🚪", "Vá para a saída!"]];
   const EMOS = [["👍", "Beleza!"], ["✋", "Espera!"], ["👉", "Vem aqui!"], ["⚠️", "Cuidado!"], ["🔑", "Pega a chave!"], ["🆘", "Preciso de ajuda!"]];
-  const WHY = { spike: "caiu nos espinhos", laser: "tocou no laser", saw: "encostou numa serra", crush: "ficou preso na porta", time: "o tempo acabou" };
+  const WHY = { spike: "Espinhos atingiram", laser: "O laser atingiu", saw: "Uma serra atingiu", crush: "Uma porta fechou sobre" };  // sem culpar ninguém
   const lsGet = (k) => { try { return localStorage.getItem(k) || ""; } catch (e) { return ""; } };
   const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch (e) {} };
   const ssGet = (k) => { try { return sessionStorage.getItem(k) || ""; } catch (e) { return ""; } };
@@ -36,7 +39,7 @@
 
   const C = {
     ws: null, url: "", same: false, probed: false, hi: null, you: null, code: "", token: "", room: null, level: null, roles: [],
-    view: "connect", snap: null, snapAt: 0, shown: [null, null, null], pose: [null, null, null], emos: [], rtt: null, closing: false, retryTimer: 0, retryStart: 0,
+    view: "connect", snap: null, snapAt: 0, off: null, att: 0, marks: [], armed: -1, armT: 0, lastMark: 0, shown: [null, null, null], pose: [null, null, null], emos: [], rtt: null, closing: false, retryTimer: 0, retryStart: 0,
     lastCount: -1, result: null, loseUntil: 0, loseText: "", lastFrame: 0, raf: 0, sentDir: [0, 0], dirAt: 0, goFlash: 0, pausedBy: -1,
   };
 
@@ -190,11 +193,16 @@
         if (!C.room || C.view === "connect") showView("lobby");
         break;
       case "room": C.room = m; renderLobby(); updateChips(); updatePaused(); break;
-      case "level": C.level = m.level; C.total = m.total; C.roles = m.roles; C.snap = null; C.result = null; C.shown = [null, null, null]; C.pose = [null, null, null]; C.wonAt = 0; C.emos = []; C.lastCount = -1; buildChips(); showView("game"); sfx("blip"); break;
+      case "level":
+        C.level = m.level; C.total = m.total; C.roles = m.roles; C.snap = null; C.result = null; C.att = 0; C.shown = [null, null, null]; C.pose = [null, null, null]; C.wonAt = 0; C.emos = []; C.marks = []; C.armed = -1; C.lastCount = -1;
+        buildChips(); showView("game"); sfx("blip");
+        // a fase está pronta neste navegador: avisa o servidor (a contagem só começa quando TODOS avisarem)
+        requestAnimationFrame(() => requestAnimationFrame(() => send({ t: "loaded" })));
+        break;
       case "s": onSnap(m); break;
-      case "ev": onEvent(m.e); break;
-      case "paused": banner("Um jogador caiu. O jogo está pausado esperando ele voltar…", "bad"); break;
-      case "stopped": C.level = null; C.snap = null; C.result = null; if (C.view === "game") showView("lobby"); renderLobby(); banner(m.why || "", m.why && m.why.includes("zeraram") ? "good" : "info", 6000); break;
+      case "ev": if (m.a != null && m.a < C.att) break; if (m.a > C.att) C.att = m.a; onEvent(m.e); break;   // evento atrasado de tentativa anterior é descartado
+      case "mark": C.marks.push({ s: m.s, k: m.k, x: m.x, y: m.y, until: performance.now() + 5000 }); sfx("blip"); break;
+      case "stopped": C.level = null; C.snap = null; C.result = null; C.marks = []; C.armed = -1; if (C.view === "game") showView("lobby"); renderLobby(); banner(m.why || "", m.why && m.why.includes("zeraram") ? "good" : "bad", 9000); break;
       case "emo": C.emos.push({ s: m.s, k: m.k, until: performance.now() + 2500 }); sfx("blip"); break;
       case "pong": C.rtt = Date.now() - m.ts; $("co-ping").textContent = C.rtt + " ms"; break;
       case "err":
@@ -204,11 +212,16 @@
     }
   }
   function onSnap(m) {
+    if (m.a < C.att) return;                       // quadro atrasado de uma tentativa anterior
     const prev = C.snap;
+    if (m.st != null) {                            // relógio do servidor: guarda a melhor estimativa (menor atraso)
+      const off = m.st - performance.now() / 1000;
+      if (C.off == null || off > C.off) C.off = off; else C.off += (off - C.off) * 0.01;
+    }
+    if (m.a > C.att) { C.att = m.a; C.shown = [null, null, null]; C.pose = [null, null, null]; C.wonAt = 0; hideResult(); }
     C.snap = m; C.snapAt = performance.now();
     if (prev && prev.ph !== "won" && m.ph === "won") C.wonAt = performance.now();
     if (m.ph === "count" && Math.ceil(m.c) !== C.lastCount) { C.lastCount = Math.ceil(m.c); if (C.lastCount > 0) sfx("tick"); }
-    if (m.ph === "count" && prev && prev.a !== m.a) { C.result = null; hideResult(); C.shown = [null, null, null]; C.pose = [null, null, null]; C.wonAt = 0; }
     if (m.ph !== "count") C.lastCount = -1;
     updateChips();
   }
@@ -226,14 +239,14 @@
     if (k === "key") { sfx("key"); banner(`🗝 ${name(e[1])} pegou a chave! Agora todos podem usar a porta.`, "good", 3500); }
     else if (k === "gate") { sfx("switch"); }
     else if (k === "plate") { if (e[2]) sfx("blip"); }
-    else if (k === "esc") { sfx("portal"); banner(`🚪 ${name(e[1])} escapou!`, "good", 2500); }
+    else if (k === "esc") { if (e[2]) sfx("portal"); }
     else if (k === "go") { sfx("blip"); C.goFlash = performance.now(); }
     else if (k === "lose") {
       sfx("lose");
-      const who = e[1], why = WHY[e[2]] || "falhou";
-      C.loseText = who >= 0 ? `${roleOf(who).icon} ${name(who)} ${why}!` : "⏱ O tempo acabou!";
+      const who = e[1];
+      C.loseText = who >= 0 && WHY[e[2]] ? `${WHY[e[2]]} ${roleOf(who).icon} ${name(who)}` : "⏱ Tempo esgotado";
       C.loseUntil = performance.now() + 2200;
-      banner(C.loseText + " Reiniciando…", "bad", 2300);
+      banner("Tentativa encerrada para todos. " + C.loseText + ". Reiniciando…", "bad", 2300);
     } else if (k === "win") { sfx("win"); }
   }
 
@@ -257,13 +270,13 @@
     const list = $("co-slots"); list.textContent = "";
     r.players.slice(0, size).forEach((p, i) => {
       const li = document.createElement("li");
-      li.className = "co-slot" + (p ? "" : " empty") + (p && !p.on ? " off" : "");
+      li.className = "co-slot" + (p ? "" : " empty") + (p && !p.on ? " off" : "") + (p && p.ready ? " ready" : "");
       if (!p) { li.textContent = "Aguardando jogador…"; }
       else {
         const infos = (p.roles || []).map((id) => C.hi && C.hi.roles[id]).filter(Boolean);
         const b = document.createElement("b"); b.textContent = p.name + (i === C.you ? " (você)" : "");
         const s = document.createElement("span");
-        s.textContent = [i === r.host ? "👑 anfitrião" : "", infos.length ? infos.map((x) => `${x.icon} ${x.name}`).join(" + ") : "sem papel", p.on ? "" : "⚠ caiu"].filter(Boolean).join(" · ");
+        s.textContent = [i === r.host ? "👑 anfitrião" : "", infos.length ? infos.map((x) => `${x.icon} ${x.name}`).join(" + ") : "sem papel", p.on ? (p.ready ? "✔ pronto" : "aguardando ficar pronto") : "⚠ desconectado"].filter(Boolean).join(" · ");
         li.append(b, s);
       }
       list.appendChild(li);
@@ -296,17 +309,51 @@
     }
     sel.value = r.level; sel.disabled = !isHost();
     $("co-level-note").textContent = isHost() ? "" : "Só o anfitrião escolhe a fase.";
+    renderLimit(r);
     const seated = r.players.slice(0, size);
+    const meP = r.players[C.you], myReady = !!(meP && meP.ready);
+    const rb = $("co-ready"); rb.textContent = myReady ? "↩ Cancelar pronto" : "✔ Estou pronto"; rb.setAttribute("aria-pressed", String(myReady)); rb.disabled = r.phase !== "lobby";
     let why = "";
     const missing = seated.filter((p) => !p).length;
     if (missing) why = `Faltam ${missing} jogador${missing > 1 ? "es" : ""}. Mande o código ${r.code}.`;
     else if (seated.some((p) => !p.on)) why = "Um jogador está desconectado.";
     else if (seated.some((p) => (p.roles || []).length !== 1)) why = "Cada jogador precisa escolher 1 poder (🔥 💧 🌿).";
+    else if (C.hi && C.hi.levels[r.level] && (C.hi.levels[r.level].min || 1) > size) why = `Essa fase precisa de ${C.hi.levels[r.level].min} jogadores.`;
+    else if (seated.some((p) => !p.ready)) why = `Aguardando ficar pronto: ${seated.filter((p) => !p.ready).map((p) => p.name).join(", ")}.`;
     const start = $("co-start");
     start.classList.toggle("hidden", !isHost());
     start.disabled = !!why;
     $("co-start-note").textContent = isHost() ? (why || "Tudo pronto!") : "Aguardando o anfitrião começar.";
   }
+
+  /** Tempo por fase: todos veem; só o anfitrião muda (e só no lobby). Mudar o tempo desfaz o "pronto" de todos. */
+  function renderLimit(r) {
+    const host = isHost(), lim = r.limit || 25, box = $("co-limit"); box.textContent = "";
+    PRESETS.forEach((v) => {
+      const b = document.createElement("button");
+      b.type = "button"; b.setAttribute("role", "radio"); b.setAttribute("aria-checked", String(v === lim)); b.textContent = v + " s";
+      b.disabled = !host || r.phase !== "lobby"; b.addEventListener("click", () => send({ t: "limit", v })); box.appendChild(b);
+    });
+    const num = $("co-limit-num"), setb = $("co-limit-set");
+    num.disabled = setb.disabled = !host || r.phase !== "lobby";
+    if (document.activeElement !== num) num.value = PRESETS.includes(lim) ? "" : lim;
+    num.placeholder = String(lim);
+    const lv = C.hi && C.hi.levels[r.level], par = lv && lv.par ? lv.par : 0;
+    const hard = C.hi ? C.hi.levels.filter((l) => l.par && lim < l.par).map((l) => l.id) : [];
+    let note = `Tempo da tentativa: ${lim} s para todos${host ? "" : " (só o anfitrião muda)"}. A velocidade de inimigos e mecanismos não muda com o tempo.`;
+    if (par && lim < par) note += ` ⚠ Com ${lim} s esta fase é impossível: nem o caminho perfeito cabe (cerca de ${par} s).`;
+    else if (par && lim < par * 3) note += ` ⚠ Tempo apertado para esta fase: o caminho perfeito leva cerca de ${par} s.`;
+    else note += " Tempos muito curtos podem tornar algumas fases impossíveis.";
+    if (hard.length) note += ` Impossíveis com ${lim} s: fase${hard.length > 1 ? "s" : ""} ${hard.join(", ")}.`;
+    $("co-limit-note").textContent = note;
+  }
+  $("co-limit-set").addEventListener("click", () => {
+    const raw = $("co-limit-num").value.trim(), v = Number(raw);
+    if (!/^\d+$/.test(raw) || v < 5 || v > 300) { $("co-limit-note").textContent = "Digite um número inteiro entre 5 e 300 segundos."; return; }
+    send({ t: "limit", v });
+  });
+  $("co-limit-num").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); $("co-limit-set").click(); } });
+  $("co-ready").addEventListener("click", () => { const me = C.room && C.room.players[C.you]; send({ t: "ready", v: !(me && me.ready) }); });
 
   /* ------------------------------------------------------------------ HUD */
   function buildChips() {
@@ -382,6 +429,31 @@
     b.addEventListener("pointerup", up); b.addEventListener("pointercancel", up); b.addEventListener("lostpointercapture", up);
     b.addEventListener("contextmenu", (e) => e.preventDefault());
   });
+  /** Marcações sem texto livre: escolha uma e toque no mapa (toque de novo no botão para marcar onde você está). */
+  function placeMark(k, x, y) {
+    const now = performance.now();
+    if (now - C.lastMark < 1200) { banner("Calma: uma marcação por vez.", "info", 1200); return; }   // o servidor também limita
+    C.lastMark = now; send({ t: "mark", k, x: Math.round(x), y: Math.round(y) });
+  }
+  function setArmed(k) {
+    C.armed = k; clearTimeout(C.armT);
+    document.querySelectorAll("#co-marks button").forEach((b, i) => b.classList.toggle("armed", i === k));
+    if (k >= 0) { C.armT = setTimeout(() => setArmed(-1), 7000); banner(`${MARKS[k][1]} — toque no mapa (ou toque de novo no botão para marcar onde você está).`, "info", 3500); }
+  }
+  MARKS.forEach((mk, k) => {
+    const b = document.createElement("button"); b.type = "button"; b.textContent = mk[0] + " " + mk[1];
+    b.addEventListener("click", () => {
+      if (C.armed === k) { const sh = C.shown[C.you]; if (sh) placeMark(k, sh.x, sh.y); setArmed(-1); } else setArmed(k);
+    });
+    $("co-marks").appendChild(b);
+  });
+  $("co-canvas").addEventListener("pointerdown", (e) => {
+    if (C.armed < 0 || C.view !== "game") return;
+    const r = $("co-canvas").getBoundingClientRect(); if (!r.width) return;
+    e.preventDefault();
+    placeMark(C.armed, Math.max(0, Math.min(W, (e.clientX - r.left) / r.width * W)), Math.max(0, Math.min(H, (e.clientY - r.top) / r.height * H)));
+    setArmed(-1);
+  });
   EMOS.forEach((em, i) => {
     const b = document.createElement("button"); b.type = "button"; b.className = "co-emo"; b.textContent = em[0]; b.title = em[1]; b.setAttribute("aria-label", `${em[1]} (tecla ${i + 1})`);
     b.addEventListener("click", () => send({ t: "emo", k: i }));
@@ -436,10 +508,13 @@
     }
     C.raf = requestAnimationFrame(frame);
   }
+  /** Tempo decorrido: calculado pelo PRAZO do servidor (en) e pelo relógio dele (st), não por um contador do navegador. */
+  function serverNow(now) { return now / 1000 + (C.off || 0); }
+  function limitOf() { const s = C.snap; return (s && s.lim) || (C.level && C.level.time) || 25; }
   function localElapsed(now) {
     const s = C.snap; if (!s) return 0;
-    if (s.ph !== "play") return s.e;
-    return Math.min(C.level.time, s.e + (now - C.snapAt) / 1000);
+    if (s.ph === "play" && s.en != null && C.off != null) return Math.max(0, Math.min(limitOf(), limitOf() - (s.en - serverNow(now))));
+    return s.e;
   }
   function glow(c, b) { if (!RM()) { ctx.shadowColor = c; ctx.shadowBlur = b; } }
   function noGlow() { ctx.shadowBlur = 0; }
@@ -457,7 +532,7 @@
     // ligações placa -> porta (fracas)
     lv.gates.forEach((g, gi) => {
       const gx = g.r[0] + g.r[2] / 2, gy = g.r[1] + g.r[3] / 2;
-      ctx.strokeStyle = GATE_COL[gi % GATE_COL.length]; ctx.globalAlpha = 0.18; ctx.lineWidth = 2; ctx.setLineDash([4, 6]);
+      ctx.strokeStyle = GATE_COL[gi % GATE_COL.length]; ctx.globalAlpha = 0.3; ctx.lineWidth = 2; ctx.setLineDash([4, 6]);
       g.plates.forEach((pi) => { const p = lv.plates[pi]; ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(gx, gy); ctx.stroke(); });
       ctx.setLineDash([]); ctx.globalAlpha = 1;
     });
@@ -486,14 +561,25 @@
         for (let k = 0; k < (vertical ? r[3] / 20 : r[2] / 20); k++) ctx.fillText(GATE_SYM[gi % GATE_SYM.length], vertical ? r[0] + r[2] / 2 : r[0] + 10 + k * 20, vertical ? r[1] + 10 + k * 20 : r[1] + r[3] / 2);
       }
     });
-    // placas
+    // mecanismos: PLACA DE PRESSÃO (retangular, ▼: a porta fica aberta só enquanto alguém está em cima) e
+    // INTERRUPTOR (redondo, ◉: depois de acionado a porta fica aberta até o fim da tentativa).
+    // Cada um leva a cor e o símbolo da porta que controla.
     lv.plates.forEach((p, pi) => {
-      const gi = lv.gates.findIndex((g) => g.plates.includes(pi)), c = GATE_COL[Math.max(0, gi) % GATE_COL.length], on = s && s.pl[pi] === 1;
+      const gi = lv.gates.findIndex((g) => g.plates.includes(pi)), gg = Math.max(0, gi), c = GATE_COL[gg % GATE_COL.length], sym = GATE_SYM[gg % GATE_SYM.length], on = s && s.pl[pi] === 1;
       ctx.save(); ctx.translate(p.x, p.y);
       glow(c, on ? 16 : 0);
       ctx.strokeStyle = c; ctx.lineWidth = 3; ctx.fillStyle = on ? c : "#14112e";
-      if (p.hold) { ctx.beginPath(); ctx.arc(0, 0, 17, 0, 7); ctx.fill(); ctx.stroke(); noGlow(); ctx.fillStyle = on ? "#07060f" : c; ctx.font = "bold 14px sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillText("▼", 0, 1); }
-      else { ctx.beginPath(); ctx.roundRect(-14, -14, 28, 28, 6); ctx.fill(); ctx.stroke(); noGlow(); ctx.fillStyle = on ? "#07060f" : c; ctx.font = "bold 14px sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillText(on ? "✔" : "●", 0, 1); }
+      ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      if (p.hold) {
+        ctx.beginPath(); ctx.roundRect(-20, -13, 40, 26, 5); ctx.fill(); ctx.stroke(); noGlow();
+        ctx.fillStyle = on ? "#07060f" : c; ctx.font = "bold 14px sans-serif"; ctx.fillText("▼", -8, 1); ctx.fillText(sym, 9, 1);
+        ctx.font = "bold 9px sans-serif"; ctx.fillStyle = c; ctx.fillText("PLACA · segurar", 0, 24);
+      } else {
+        ctx.beginPath(); ctx.arc(0, 0, 15, 0, 7); ctx.fill(); ctx.stroke(); noGlow();
+        ctx.beginPath(); ctx.arc(0, 0, 8, 0, 7); ctx.strokeStyle = on ? "#07060f" : c; ctx.lineWidth = 2; ctx.stroke();
+        ctx.fillStyle = on ? "#07060f" : c; ctx.font = "bold 11px sans-serif"; ctx.fillText(on ? "✔" : sym, 0, 1);
+        ctx.font = "bold 9px sans-serif"; ctx.fillStyle = c; ctx.fillText("INTERRUPTOR · liga", 0, 24);
+      }
       noGlow(); ctx.restore();
     });
     // lasers
@@ -516,8 +602,16 @@
       for (let i = 0; i < 20; i++) { const a = (i / 20) * Math.PI * 2, rr = i % 2 ? m.r * 0.78 : m.r + 2; ctx.lineTo(Math.cos(a) * rr, Math.sin(a) * rr); }
       ctx.closePath(); ctx.fill(); noGlow(); ctx.fillStyle = "#1a0830"; ctx.beginPath(); ctx.arc(0, 0, m.r * 0.35, 0, 7); ctx.fill(); ctx.restore();
     }
-    // porta de saída
+    // porta de saída e ÁREA de saída (todos precisam estar dentro dela, vivos, ao mesmo tempo)
     const d = lv.door, open = !!(s && s.k);
+    ctx.strokeStyle = open ? "rgba(57,255,136,.8)" : "rgba(140,136,184,.55)"; ctx.lineWidth = 2; ctx.setLineDash([8, 6]);
+    ctx.fillStyle = open ? "rgba(57,255,136,.07)" : "rgba(140,136,184,.05)";
+    ctx.fillRect(d[0] - EXIT_HALF, d[1] - EXIT_HALF, EXIT_HALF * 2, EXIT_HALF * 2); ctx.strokeRect(d[0] - EXIT_HALF, d[1] - EXIT_HALF, EXIT_HALF * 2, EXIT_HALF * 2); ctx.setLineDash([]);
+    if (s) {
+      ctx.font = "bold 12px sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "alphabetic";
+      const ty = d[1] - EXIT_HALF - 6 < 14 ? d[1] + EXIT_HALF + 14 : d[1] - EXIT_HALF - 6;
+      ctx.lineWidth = 3; ctx.strokeStyle = "rgba(7,6,15,.9)"; const tx = `${s.in || 0}/${s.n || nP()}`; ctx.strokeText(tx, d[0], ty); ctx.fillStyle = (s.in || 0) === (s.n || nP()) ? "#39ff88" : "#e9e7ff"; ctx.fillText(tx, d[0], ty);
+    }
     glow(open ? "#39ff88" : "#000", open ? 16 : 0);
     ctx.fillStyle = open ? "rgba(57,255,136,.18)" : "#17142e"; ctx.strokeStyle = open ? "#39ff88" : "#6a6690"; ctx.lineWidth = 3;
     ctx.beginPath(); ctx.moveTo(d[0] - 20, d[1] + 20); ctx.lineTo(d[0] - 20, d[1] - 8); ctx.arc(d[0], d[1] - 8, 20, Math.PI, 0); ctx.lineTo(d[0] + 20, d[1] + 20); ctx.closePath(); ctx.fill(); ctx.stroke(); noGlow();
@@ -537,7 +631,6 @@
         let sh = C.shown[i];
         if (!sh || Math.hypot(sh.x - tg[0], sh.y - tg[1]) > 70 || RM()) sh = C.shown[i] = { x: tg[0], y: tg[1] };
         else { sh.x += (tg[0] - sh.x) * k; sh.y += (tg[1] - sh.y) * k; }
-        if (tg[2] === 1) { C.pose[i] = null; continue; }
         const r = roleOf(i), pl = C.room && C.room.players[i], skin = (pl && pl.skin) || "explorer";
         let po = C.pose[i];
         if (!po) po = C.pose[i] = { px: sh.x, py: sh.y, t: 0, fx: i === C.you ? 1 : 1, fy: 0, walk: 0, phase: 0, dash: false, glow: 0, dead: -1, win: false, rm: false };
@@ -554,7 +647,7 @@
         else { ctx.save(); ctx.translate(sh.x, sh.y); glow(r.color, 12); ctx.fillStyle = r.color; ctx.beginPath(); ctx.arc(0, 0, 11, 0, 7); ctx.fill(); noGlow(); ctx.restore(); }
         ctx.save(); ctx.translate(sh.x, sh.y);
         ctx.font = "bold 11px sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "alphabetic"; ctx.lineWidth = 3; ctx.strokeStyle = "rgba(7,6,15,.9)";
-        const label = (i === C.you ? "▼ " : "") + r.icon + " " + name(i); ctx.strokeText(label, 0, -22); ctx.fillStyle = i === C.you ? "#fff" : r.color; ctx.fillText(label, 0, -22);
+        const label = (i === C.you ? "▼ " : "") + r.icon + " " + name(i) + (tg[2] === 1 ? " ✔" : ""); ctx.strokeText(label, 0, -22); ctx.fillStyle = i === C.you ? "#fff" : r.color; ctx.fillText(label, 0, -22);
         ctx.restore();
       }
     }
@@ -590,11 +683,36 @@
       ctx.fillStyle = "#e9e7ff"; ctx.font = "bold 20px sans-serif"; ctx.fillText(`${s.e.toFixed(1)} s de ${C.level.time} s`, W / 2, H / 2 + 44);
       ctx.globalAlpha = 1;
     }
+    // marcações no mapa (autor, símbolo e cor do papel)
+    C.marks = C.marks.filter((m) => m.until > now);
+    for (const m of C.marks) {
+      const r = roleOf(m.s), life = (m.until - now) / 5000, mk = MARKS[m.k] || MARKS[0];
+      const pulse = RM() ? 0 : (1 - life) * 26 % 26;
+      ctx.save(); ctx.translate(m.x, m.y); ctx.globalAlpha = Math.min(1, life * 3);
+      glow(r.color, 12); ctx.strokeStyle = r.color; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(0, 0, 10 + pulse, 0, 7); ctx.stroke(); ctx.beginPath(); ctx.arc(0, 0, 5, 0, 7); ctx.fillStyle = r.color; ctx.fill(); noGlow();
+      const txt = `${mk[0]} ${mk[1]} — ${r.icon} ${name(m.s)}`;
+      ctx.font = "bold 12px sans-serif"; const w = ctx.measureText(txt).width + 14, bx = Math.max(-m.x + 4, Math.min(W - m.x - w - 4, -w / 2)), by = m.y < 50 ? 18 : -42;
+      ctx.fillStyle = "rgba(18,16,42,.95)"; ctx.strokeStyle = r.color; ctx.lineWidth = 2; ctx.beginPath(); ctx.roundRect(bx, by, w, 22, 7); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = "#fff"; ctx.textAlign = "left"; ctx.textBaseline = "middle"; ctx.fillText(txt, bx + 7, by + 11);
+      ctx.restore();
+    }
+    // espera pela carga em todos os navegadores (o tempo não corre)
+    const ld = $("co-load");
+    if (!s || s.ph === "wait") {
+      const waiting = s && s.ld ? s.ld.map((v, i) => (v ? null : name(i))).filter(Boolean) : [];
+      ld.textContent = waiting.length ? "Preparando a fase… aguardando " + waiting.join(", ") : "Preparando a fase…"; ld.classList.remove("hidden");
+    } else ld.classList.add("hidden");
     // HUD em texto
-    const left = Math.max(0, C.level.time - t);
+    const lim = limitOf(), left = Math.max(0, lim - t);
     const tm = $("co-timer"); tm.textContent = left.toFixed(1);
     tm.classList.toggle("danger", left <= 5 && s && s.ph === "play");
-    $("co-bar").style.width = Math.max(0, Math.min(100, (left / C.level.time) * 100)) + "%";
+    $("co-bar").style.width = Math.max(0, Math.min(100, (left / lim) * 100)) + "%";
+    const ex = $("co-exit");
+    if (s) {
+      const need = s.n || nP(), inn = s.in || 0;
+      ex.textContent = `Jogadores na saída: ${inn}/${need}` + (s.k ? "" : " · falta pegar a chave 🗝");
+      ex.parentNode.classList.toggle("ok", inn === need && s.k === 1);
+    }
   }
 
   /* ------------------------------------------------------------------ ligações da interface */
@@ -613,7 +731,7 @@
     try { await navigator.clipboard.writeText(text); banner("Convite copiado! Cole no WhatsApp ou Discord.", "good", 3000); }
     catch (e) { const ta = document.createElement("textarea"); ta.value = text; document.body.appendChild(ta); ta.select(); try { document.execCommand("copy"); banner("Convite copiado!", "good", 3000); } catch (x) { banner("Copie o código: " + C.code, "info", 5000); } ta.remove(); }
   });
-  $("co-restart").addEventListener("click", () => send({ t: "restart" }));
+  $("co-restart").addEventListener("click", () => send({ t: "restart", a: C.snap ? C.snap.a : undefined }));
   $("co-menu").addEventListener("click", togglePop);
   $("co-pop-continue").addEventListener("click", togglePop);
   $("co-pop-lobby").addEventListener("click", () => { togglePop(); send({ t: "lobby" }); });

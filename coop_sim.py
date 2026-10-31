@@ -6,8 +6,10 @@ Regras (iguais às da campanha onde existem equivalentes):
   jogador: círculo de raio 11, 260 u/s, anda em micro-passos de no máximo 3 u (nunca atravessa parede);
   espinhos/lasers com a mesma tolerância da campanha (3 e 2 u); serras: contato quando a distância
   é menor que 11 + raio - 3.
-Fluxo de uma tentativa: contagem (3 s) -> jogo (o tempo corre) -> won | lost. Perdeu: o servidor
-reinicia sozinho depois de LOSE_PAUSE segundos.
+Fluxo de uma tentativa: espera (todos carregando) -> contagem (3 s) -> jogo (o tempo corre) -> won | lost.
+Perdeu (qualquer perigo, esmagamento ou tempo): a tentativa acaba para TODOS e o servidor reinicia sozinho
+depois de LOSE_PAUSE segundos. Vitória: com a chave pega, TODOS os participantes vivos dentro da área de saída
+ao mesmo tempo. Ninguém some ao chegar na saída.
 """
 import math
 
@@ -18,6 +20,7 @@ SPEED = 260.0
 STEP = 3.0
 KEY_R = 12
 DOOR_HALF = 20
+EXIT_HALF = 36          # a saída é uma ÁREA (72x72 u): vale o centro do jogador dentro dela; cabem os 3 sem sobrepor
 PLATE_R = 20.0          # distância (centro do jogador até a placa) que conta como "em cima"
 SPIKE_INSET = 3
 LASER_INSET = 2
@@ -58,11 +61,13 @@ def saw_pos(m, t):
 
 
 class Sim:
-    def __init__(self, level, roles):
+    def __init__(self, level, roles, limit=None, wait=False):
         self.lv = level
         # papéis de cada vaga: lista de ids (com menos de 3 jogadores, um jogador acumula papéis)
         self.roles = [[r] if isinstance(r, str) else list(r) for r in roles]
         self.n = len(self.roles)          # 1..3 jogadores
+        self.limit = float(limit) if limit else float(level["time"])   # tempo da tentativa (escolhido no lobby)
+        self._wait = bool(wait)           # True: só começa a contagem quando o servidor chamar begin()
         self.attempt = 0
         self.inp = [(0.0, 0.0)] * self.n
         self.events = []
@@ -79,12 +84,19 @@ class Sim:
         self.pressed = [False] * len(lv["plates"])
         self.gate_open = [False] * len(lv["gates"])
         self.t = 0.0
-        self.phase = "count"
+        self.phase = "wait" if self._wait else "count"
+        self._wait = False                # depois de uma derrota o reinício vai direto à contagem
         self.count = COUNTDOWN
         self.after = 0.0
         self.result = None
         self._resume_play = False
         self.events.append(("start", self.attempt))
+
+    def begin(self):
+        """Todos carregaram: começa a contagem de 3 s (e só depois dela o tempo corre)."""
+        if self.phase == "wait":
+            self.phase = "count"
+            self.count = COUNTDOWN
 
     def resume_count(self, secs=2.0):
         """Depois de uma reconexão: nada se mexe durante a contagem."""
@@ -178,58 +190,56 @@ class Sim:
         closed = self._closed_gates()
         # 1) movimento
         for i in range(self.n):
-            if self.esc[i]:
-                continue
             ux, uy = self.inp[i]
             if ux or uy:
                 self._move(self.pos[i], ux * SPEED * dt, uy * SPEED * dt, closed)
-        # 2) placas e portas
+        # 2) placas (segurar) e interruptores (ficam ligados); vários jogadores na mesma placa não alternam nada
         for k, pl in enumerate(lv["plates"]):
-            on = any((not self.esc[i]) and math.hypot(self.pos[i][0] - pl["x"], self.pos[i][1] - pl["y"]) < PLATE_R for i in range(self.n))
+            on = any(math.hypot(self.pos[i][0] - pl["x"], self.pos[i][1] - pl["y"]) < PLATE_R for i in range(self.n))
             if on != self.pressed[k]:
                 self.pressed[k] = on
                 self.events.append(("plate", k, on))
             if on and not pl["hold"] and not self.latched[k]:
                 self.latched[k] = True
         for gi, g in enumerate(lv["gates"]):
-            op = all((lv["plates"][k]["hold"] and self.pressed[k]) or (not lv["plates"][k]["hold"] and self.latched[k]) for k in g["plates"])
-            if op != self.gate_open[gi]:
-                self.gate_open[gi] = op
-                self.events.append(("gate", gi, op))
+            want = all((lv["plates"][k]["hold"] and self.pressed[k]) or (not lv["plates"][k]["hold"] and self.latched[k]) for k in g["plates"])
+            # uma porta nunca fecha em cima de alguém: fica aberta enquanto a passagem estiver ocupada
+            if not want and self.gate_open[gi] and any(circle_rect(self.pos[i][0], self.pos[i][1], PLAYER_R, g["r"]) for i in range(self.n)):
+                want = True
+            if want != self.gate_open[gi]:
+                self.gate_open[gi] = want
+                self.events.append(("gate", gi, want))
         closed = self._closed_gates()
-        for g in lv["gates"]:
+        for g in lv["gates"]:           # rede de segurança (não deve acontecer): empurra para fora ou perde
             if g["r"] in closed:
                 for i in range(self.n):
-                    if not self.esc[i] and circle_rect(self.pos[i][0], self.pos[i][1], PLAYER_R, g["r"]):
+                    if circle_rect(self.pos[i][0], self.pos[i][1], PLAYER_R, g["r"]):
                         if not self._eject(i, g, closed):
                             return self._lose(i, "crush")
-        # 3) chave e porta de saída
+        # 3) chave e área de saída
+        d = lv["door"]
         for i in range(self.n):
-            if self.esc[i]:
-                continue
             px, py = self.pos[i]
             if not self.has_key and (px - lv["key"][0]) ** 2 + (py - lv["key"][1]) ** 2 < (PLAYER_R + KEY_R) ** 2:
                 self.has_key = True
                 self.events.append(("key", i))
-            d = lv["door"]
-            if self.has_key and circle_rect(px, py, PLAYER_R, [d[0] - DOOR_HALF, d[1] - DOOR_HALF, DOOR_HALF * 2, DOOR_HALF * 2]):
-                self.esc[i] = True
-                self.events.append(("esc", i))
-        # 4) perigos (quem já escapou está a salvo)
+            inside = abs(px - d[0]) <= EXIT_HALF and abs(py - d[1]) <= EXIT_HALF
+            if inside != self.esc[i]:
+                self.esc[i] = inside
+                self.events.append(("esc", i, inside))
+        # 4) perigos: qualquer jogador atingido encerra a tentativa de todos
         for i in range(self.n):
-            if self.esc[i]:
-                continue
             why = self._hazard(i)
             if why:
                 return self._lose(i, why)
-        # 5) vitória / tempo
-        if all(self.esc):
+        # 5) vitória (todos dentro da saída, com a chave) / tempo
+        if self.has_key and all(self.esc):
             self.phase = "won"
             self.result = {"time": round(self.t, 2), "attempt": self.attempt}
             self.events.append(("win", self.result))
             return
-        if self.t >= lv["time"]:
-            self.t = lv["time"]
+        if self.t >= self.limit:
+            self.t = self.limit
             return self._lose(-1, "time")
 
     def _hazard(self, i):
@@ -265,6 +275,7 @@ class Sim:
         r = lambda v: round(v, 1)
         return {
             "t": "s", "ph": self.phase, "c": round(self.count, 2), "e": round(self.t, 3), "a": self.attempt,
+            "lim": self.limit, "in": sum(1 for x in self.esc if x), "n": self.n,
             "p": [[r(p[0]), r(p[1]), 1 if self.esc[i] else 0] for i, p in enumerate(self.pos)],
             "g": [1 if o else 0 for o in self.gate_open],
             "pl": [1 if (self.pressed[k] or self.latched[k]) else 0 for k in range(len(self.pressed))],

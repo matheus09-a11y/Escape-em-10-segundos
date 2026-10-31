@@ -427,3 +427,14 @@ body:not(.touch) #co-bottom { justify-content: center; } body:not(.touch) .co-ac
 
 .co-sizes { display: flex; gap: 8px; margin: 4px 0; } .co-sizes button { flex: 1; min-height: 44px; border-radius: 10px; border: 2px solid #3a3680; background: #1a1740; color: var(--text, #e9e7ff); font-weight: 700; font-size: 15px; cursor: pointer; }
 .co-sizes button[aria-checked="true"] { border-color: #19f0ff; background: #12335a; } .co-sizes button:disabled { opacity: .6; cursor: default; }
+
+.co-limits button { min-height: 40px; font-size: 14px; padding: 0 4px; } .co-limits { flex-wrap: wrap; } .co-limits button { flex: 1 1 52px; }
+.co-custom { display: flex; gap: 8px; align-items: center; margin: 6px 0; flex-wrap: wrap; } .co-custom label { font-size: 13px; color: var(--dim); }
+.co-custom input { width: 84px; min-height: 40px; border-radius: 10px; border: 2px solid #3a3680; background: #1a1740; color: var(--text, #e9e7ff); font-size: 16px; padding: 0 8px; }
+.co-slot.ready { border-color: var(--green); } .co-slot .rd { color: var(--green); font-weight: 700; }
+#co-ready[aria-pressed="true"] { border-color: var(--green); color: var(--green); }
+.co-h3 { font-size: 13px; font-weight: 700; color: var(--cyan); min-height: 16px; } .co-h3.ok { color: var(--green); }
+#co-marks { display: flex; gap: 4px; flex-wrap: wrap; justify-content: center; flex: 1 1 100%; order: 4; }
+#co-marks button { min-height: 40px; padding: 0 10px; border-radius: 10px; border: 2px solid #3a3680; background: #1a1740; color: var(--text, #e9e7ff); font-size: 13px; font-weight: 700; touch-action: manipulation; }
+#co-marks button.armed { border-color: var(--gold); background: rgba(255, 210, 63, .18); color: var(--gold); }
+#co-load { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; text-align: center; background: rgba(7, 6, 15, .78); z-index: 2; padding: 12px; font-weight: 700; font-size: 18px; color: var(--cyan); }
