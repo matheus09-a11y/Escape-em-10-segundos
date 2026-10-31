@@ -424,3 +424,6 @@ body.touch #co-pad { display: block; }
 body.co-playing #hud, body.co-playing #hint { display: none; }
 #co-pad { order: 1; } .co-acts { order: 2; flex-direction: column; margin-left: auto; } #co-emos { order: 3; flex: 1 1 100%; }
 body:not(.touch) #co-bottom { justify-content: center; } body:not(.touch) .co-acts { flex-direction: row; margin-left: 0; } body:not(.touch) #co-emos { flex: 1 1 auto; order: 1; } body:not(.touch) .co-acts { order: 2; }
+
+.co-sizes { display: flex; gap: 8px; margin: 4px 0; } .co-sizes button { flex: 1; min-height: 44px; border-radius: 10px; border: 2px solid #3a3680; background: #1a1740; color: var(--text, #e9e7ff); font-weight: 700; font-size: 15px; cursor: pointer; }
+.co-sizes button[aria-checked="true"] { border-color: #19f0ff; background: #12335a; } .co-sizes button:disabled { opacity: .6; cursor: default; }

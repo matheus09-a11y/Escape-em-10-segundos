@@ -205,7 +205,14 @@
     updateChips();
   }
   function name(i) { const p = C.room && C.room.players[i]; return p ? p.name : "Jogador"; }
-  function roleOf(i) { return C.hi && C.hi.roles[C.roles[i]] || { name: "?", icon: "●", color: "#aaa" }; }
+  /** Papéis do jogador i (lista). Com menos de 3 jogadores um jogador acumula papéis. */
+  function roleIds(i) { const r = C.roles && C.roles[i]; return Array.isArray(r) ? r : r ? [r] : []; }
+  function roleOf(i) {
+    const infos = roleIds(i).map((id) => C.hi && C.hi.roles[id]).filter(Boolean);
+    if (!infos.length) return { name: "?", icon: "●", color: "#aaa" };
+    return { name: infos.map((x) => x.name).join(" + "), icon: infos.map((x) => x.icon).join(""), color: infos[0].color };
+  }
+  function nP() { return C.roles && C.roles.length ? C.roles.length : 3; }
   function onEvent(e) {
     const k = e[0];
     if (k === "key") { sfx("key"); banner(`🗝 ${name(e[1])} pegou a chave! Agora todos podem usar a porta.`, "good", 3500); }
@@ -228,47 +235,66 @@
     const r = C.room;
     if (!r || C.view === "connect") return;
     $("co-code-big").textContent = r.code;
+    const size = r.size || 3, mineRoles = (r.players[C.you] && r.players[C.you].roles) || [];
+    const sizeEl = $("co-size"); sizeEl.textContent = "";
+    for (let n = 1; n <= 3; n++) {
+      const b = document.createElement("button");
+      b.type = "button"; b.setAttribute("role", "radio"); b.setAttribute("aria-checked", String(n === size));
+      b.textContent = n === 1 ? "1 jogador" : n + " jogadores";
+      b.disabled = !isHost() || r.phase !== "lobby";
+      b.addEventListener("click", () => send({ t: "size", n }));
+      sizeEl.appendChild(b);
+    }
+    $("co-size-note").textContent = isHost() ? (size < 3 ? "Com menos de 3, cada jogador pode pegar mais de um papel (🔥 💧 🌿)." : "") : "Só o anfitrião escolhe quantos jogam.";
     const list = $("co-slots"); list.textContent = "";
-    r.players.forEach((p, i) => {
+    r.players.slice(0, size).forEach((p, i) => {
       const li = document.createElement("li");
       li.className = "co-slot" + (p ? "" : " empty") + (p && !p.on ? " off" : "");
       if (!p) { li.textContent = "Aguardando jogador…"; }
       else {
-        const role = p.role && C.hi ? C.hi.roles[p.role] : null;
+        const infos = (p.roles || []).map((id) => C.hi && C.hi.roles[id]).filter(Boolean);
         const b = document.createElement("b"); b.textContent = p.name + (i === C.you ? " (você)" : "");
         const s = document.createElement("span");
-        s.textContent = [i === r.host ? "👑 anfitrião" : "", role ? `${role.icon} ${role.name}` : "sem papel", p.on ? "" : "⚠ caiu"].filter(Boolean).join(" · ");
+        s.textContent = [i === r.host ? "👑 anfitrião" : "", infos.length ? infos.map((x) => `${x.icon} ${x.name}`).join(" + ") : "sem papel", p.on ? "" : "⚠ caiu"].filter(Boolean).join(" · ");
         li.append(b, s);
       }
       list.appendChild(li);
     });
     const rolesEl = $("co-roles"); rolesEl.textContent = "";
-    const mine = r.players[C.you] && r.players[C.you].role;
+    $("co-roles-note").textContent = size < 3 ? "Todos os 3 papéis precisam ser escolhidos. Toque de novo para soltar um papel." : "";
     for (const id of Object.keys(C.hi ? C.hi.roles : {})) {
-      const info = C.hi.roles[id];
-      const takenBy = r.players.findIndex((p, i) => p && p.role === id && i !== C.you);
+      const info = C.hi.roles[id], have = mineRoles.includes(id);
+      const takenBy = r.players.findIndex((p, i) => p && i !== C.you && (p.roles || []).includes(id));
       const b = document.createElement("button");
-      b.type = "button"; b.className = "co-role"; b.setAttribute("role", "radio"); b.setAttribute("aria-checked", String(mine === id));
+      b.type = "button"; b.className = "co-role"; b.setAttribute("role", "checkbox"); b.setAttribute("aria-checked", String(have));
       b.disabled = takenBy >= 0 || r.phase !== "lobby";
       b.style.setProperty("--rc", info.color);
       b.innerHTML = `<b></b><span></span><small></small>`;
       b.children[0].textContent = `${info.icon} ${info.name}`;
       b.children[1].textContent = info.desc;
-      b.children[2].textContent = takenBy >= 0 ? `Escolhido por ${r.players[takenBy].name}` : mine === id ? "Seu papel (toque para soltar)" : "Toque para escolher";
-      b.addEventListener("click", () => send({ t: "role", role: mine === id ? null : id }));
+      b.children[2].textContent = takenBy >= 0 ? `Escolhido por ${r.players[takenBy].name}` : have ? "Seu papel (toque para soltar)" : "Toque para escolher";
+      b.addEventListener("click", () => send({ t: "role", role: id }));
       rolesEl.appendChild(b);
     }
     const sel = $("co-level");
-    if (!sel.options.length && C.hi) C.hi.levels.forEach((l, i) => { const o = document.createElement("option"); o.value = i; o.textContent = `${l.id}. ${l.name} (${l.time}s)`; sel.appendChild(o); });
+    if (C.hi) {
+      sel.textContent = "";
+      C.hi.levels.forEach((l, i) => {
+        const o = document.createElement("option"); o.value = i;
+        const need = l.min || 1;
+        o.textContent = `${l.id}. ${l.name} (${l.time}s)` + (need > 1 ? ` · ${need}+ jogadores` : "");
+        o.disabled = need > size; sel.appendChild(o);
+      });
+    }
     sel.value = r.level; sel.disabled = !isHost();
     $("co-level-note").textContent = isHost() ? "" : "Só o anfitrião escolhe a fase.";
-    const connected = r.players.filter((p) => p && p.on).length;
-    const roles = r.players.map((p) => p && p.role);
+    const seated = r.players.slice(0, size);
     let why = "";
-    if (connected < 3 || r.players.some((p) => !p)) why = `Faltam ${3 - r.players.filter(Boolean).length} jogador(es). Mande o código ${r.code}.`;
-    else if (r.players.some((p) => p && !p.on)) why = "Um jogador está desconectado.";
-    else if (roles.some((x) => !x)) why = "Cada jogador precisa escolher um papel.";
-    else if (new Set(roles).size < 3) why = "Os papéis precisam ser diferentes.";
+    const missing = seated.filter((p) => !p).length;
+    if (missing) why = `Faltam ${missing} jogador${missing > 1 ? "es" : ""}. Mande o código ${r.code}.`;
+    else if (seated.some((p) => !p.on)) why = "Um jogador está desconectado.";
+    else if (seated.some((p) => !(p.roles || []).length)) why = "Cada jogador precisa escolher pelo menos um papel.";
+    else if (seated.reduce((n, p) => n + p.roles.length, 0) !== 3) why = "Os 3 papéis (🔥 💧 🌿) precisam estar escolhidos.";
     const start = $("co-start");
     start.classList.toggle("hidden", !isHost());
     start.disabled = !!why;
@@ -278,7 +304,7 @@
   /* ------------------------------------------------------------------ HUD */
   function buildChips() {
     const box = $("co-chips"); box.textContent = "";
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < nP(); i++) {
       const d = document.createElement("div"); d.className = "co-chip"; d.id = "co-chip" + i;
       d.style.setProperty("--rc", roleOf(i).color);
       box.appendChild(d);
@@ -290,7 +316,7 @@
   function updateChips() {
     if (!C.level) return;
     const s = C.snap;
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < nP(); i++) {
       const d = $("co-chip" + i); if (!d) continue;
       const esc = s && s.p[i][2] === 1, r = roleOf(i), p = C.room && C.room.players[i];
       d.textContent = `${r.icon} ${name(i)}${i === C.you ? " (você)" : ""}${esc ? " ✔" : ""}${p && !p.on ? " ⚠" : ""}`;
@@ -303,7 +329,7 @@
   }
   function updatePaused() {
     const r = C.room; if (!r || C.view !== "game") return;
-    const off = r.players.findIndex((p) => p && !p.on);
+    const off = r.players.slice(0, r.size || 3).findIndex((p) => p && !p.on);
     if (off >= 0) banner(`⚠ ${r.players[off].name} caiu. Pausado — esperando voltar (até 30 s).`, "bad");
     else if (C.pausedBy >= 0) banner("Todos voltaram!", "good", 2000);
     C.pausedBy = off;
@@ -496,7 +522,7 @@
     // jogadores
     if (s) {
       const k = 1 - Math.exp(-dt * 22);
-      for (let i = 0; i < 3; i++) {
+      for (let i = 0; i < Math.min(nP(), s.p.length); i++) {
         const tg = s.p[i];
         let sh = C.shown[i];
         if (!sh || Math.hypot(sh.x - tg[0], sh.y - tg[1]) > 70 || RM()) sh = C.shown[i] = { x: tg[0], y: tg[1] };

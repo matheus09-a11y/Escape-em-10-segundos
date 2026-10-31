@@ -142,15 +142,18 @@ LEVELS.append({
     "key": [700, 430], "door": [760, 230],
 })
 
+# mínimo de jogadores para a fase ser possível (placas de segurar exigem gente para segurar E passar)
+MIN_PLAYERS = [1, 1, 2, 3, 3]
 for i, lv in enumerate(LEVELS):
     lv["id"] = i + 1
+    lv["min"] = MIN_PLAYERS[i]
 
 
 def public(lv):
     """O que o cliente precisa para desenhar a fase (cópia sem nada interno)."""
-    keys = ("id", "name", "time", "hint", "starts", "walls", "spikes", "lasers", "saws", "plates", "gates", "key", "door")
+    keys = ("id", "name", "time", "min", "hint", "starts", "walls", "spikes", "lasers", "saws", "plates", "gates", "key", "door")
     return {k: lv[k] for k in keys}
 
 
 def catalog():
-    return [{"id": lv["id"], "name": lv["name"], "time": lv["time"]} for lv in LEVELS]
+    return [{"id": lv["id"], "name": lv["name"], "time": lv["time"], "min": lv["min"]} for lv in LEVELS]

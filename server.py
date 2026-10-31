@@ -171,7 +171,7 @@ def clean_name(s):
 class Slot:
     def __init__(self, idx, name, conn):
         self.idx, self.name, self.conn = idx, name, conn
-        self.role = None
+        self.roles = []             # com menos de 3 jogadores, um jogador pode acumular papéis
         self.skin = "explorer"
         self.token = secrets.token_urlsafe(12)
         self.dropped = None          # instante da queda (None = conectado)
@@ -183,6 +183,7 @@ class Room:
     def __init__(self, code):
         self.code = code
         self.slots = [None, None, None]
+        self.size = 3             # quantos jogadores esta sala terá (1 a 3), escolhido pelo anfitrião
         self.host = 0
         self.level = 0
         self.phase = "lobby"      # lobby | playing
@@ -204,16 +205,16 @@ class Room:
 
     def state(self):
         return {
-            "t": "room", "code": self.code, "host": self.host, "level": self.level, "phase": self.phase, "paused": self.paused,
-            "players": [None if s is None else {"name": s.name, "role": s.role, "skin": s.skin, "on": bool(s.conn and s.conn.alive)} for s in self.slots],
+            "t": "room", "code": self.code, "host": self.host, "size": self.size, "level": self.level, "phase": self.phase, "paused": self.paused,
+            "players": [None if s is None else {"name": s.name, "roles": s.roles, "skin": s.skin, "on": bool(s.conn and s.conn.alive)} for s in self.slots],
         }
 
     def push_state(self):
         self.broadcast(self.state())
 
     def free_slot(self):
-        for i, s in enumerate(self.slots):
-            if s is None:
+        for i in range(self.size):
+            if self.slots[i] is None:
                 return i
         return None
 
@@ -237,14 +238,17 @@ class Room:
 
     # -- jogo
     def can_start(self):
-        ss = self.slots
-        if any(s is None or not (s.conn and s.conn.alive) for s in ss):
-            return "Precisamos de 3 jogadores conectados."
-        roles = [s.role for s in ss]
-        if any(r is None for r in roles):
-            return "Cada jogador precisa escolher um papel."
-        if len(set(roles)) != 3:
-            return "Os 3 papéis precisam ser diferentes."
+        ss = self.slots[:self.size]
+        if any(x is None or not (x.conn and x.conn.alive) for x in ss):
+            return f"Precisamos de {self.size} jogador{'es' if self.size > 1 else ''} conectado{'s' if self.size > 1 else ''}."
+        if any(not x.roles for x in ss):
+            return "Cada jogador precisa escolher pelo menos um papel."
+        claimed = [r for x in ss for r in x.roles]
+        if len(claimed) != len(ROLE_IDS) or set(claimed) != set(ROLE_IDS):
+            return "Os 3 papéis (🔥 💧 🌿) precisam estar escolhidos, cada um por um jogador."
+        need = LEVELS[self.level]["min"]
+        if self.size < need:
+            return f"Essa fase precisa de pelo menos {need} jogadores."
         return None
 
     def start_game(self):
@@ -252,22 +256,24 @@ class Room:
         self.paused = False
         self.won_at = None
         lv = LEVELS[self.level]
-        self.sim = Sim(lv, [s.role for s in self.slots])
+        self.sim = Sim(lv, [s.roles for s in self.slots[:self.size]])
         for s in self.slots:
-            s.inp, s.inp_t = (0.0, 0.0), 0.0
-        self.broadcast({"t": "level", "level": public(lv), "n": self.level, "total": len(LEVELS), "roles": [s.role for s in self.slots]})
+            if s:
+                s.inp, s.inp_t = (0.0, 0.0), 0.0
+        self.broadcast({"t": "level", "level": public(lv), "n": self.level, "total": len(LEVELS), "roles": [s.roles for s in self.slots[:self.size]], "size": self.size})
         self.push_state()
         if self.task:
             self.task.cancel()
         self.task = asyncio.ensure_future(self.run())
 
     def advance(self):
-        """Depois da vitória: segue sozinho para a próxima fase (ou encerra na última)."""
-        if self.level + 1 < len(LEVELS):
-            self.level += 1
+        """Depois da vitória: segue sozinho para a próxima fase possível (ou encerra)."""
+        nxt = next((i for i in range(self.level + 1, len(LEVELS)) if LEVELS[i]["min"] <= self.size), None)
+        if nxt is not None:
+            self.level = nxt
             self.start_game()
         else:
-            self.stop_game("Vocês zeraram o modo cooperativo! 🏆")
+            self.stop_game("Vocês zeraram o que dava para jogar com " + str(self.size) + " jogador" + ("es" if self.size > 1 else "") + "! 🏆")
 
     def stop_game(self, why=None):
         self.phase = "lobby"
@@ -393,7 +399,7 @@ def handle(conn, m):
             return err(conn, "Essa sala já começou a jogar.")
         i = r.free_slot()
         if i is None:
-            return err(conn, "A sala está cheia (3 jogadores).")
+            return err(conn, f"A sala está cheia ({r.size} jogador{'es' if r.size > 1 else ''}).")
         r.slots[i] = Slot(i, clean_name(m.get("name")), conn)
         r.slots[i].skin = clean_skin(m.get("skin"))
         attach(conn, r, i)
@@ -416,8 +422,8 @@ def handle(conn, m):
             old.close()
         conn.send({"t": "joined", "code": r.code, "you": idx, "token": r.slots[idx].token, "back": True})
         if r.phase == "playing" and r.sim:
-            conn.send({"t": "level", "level": public(LEVELS[r.level]), "n": r.level, "total": len(LEVELS), "roles": [s.role for s in r.slots]})
-            if all(s and s.conn and s.conn.alive for s in r.slots):
+            conn.send({"t": "level", "level": public(LEVELS[r.level]), "n": r.level, "total": len(LEVELS), "roles": [s.roles for s in r.slots[:r.size]], "size": r.size})
+            if all(s and s.conn and s.conn.alive for s in r.slots[:r.size]):
                 r.paused = False
                 r.sim.resume_count(2.0)
         r.reassign_host()
@@ -430,11 +436,32 @@ def handle(conn, m):
         if room.phase != "lobby":
             return
         r = m.get("role")
-        if r is not None and r not in ROLES:
+        if r is None:
+            me.roles = []
+        elif r in ROLES:
+            if r in me.roles:
+                me.roles.remove(r)
+            elif any(x and x is not me and r in x.roles for x in room.slots):
+                return err(conn, "Esse papel já foi escolhido por outro jogador.")
+            else:
+                me.roles.append(r)
+        else:
             return
-        if r is not None and any(s and s is not me and s.role == r for s in room.slots):
-            return err(conn, "Esse papel já foi escolhido por outro jogador.")
-        me.role = r
+        room.push_state()
+    elif t == "size":
+        if conn.slot != room.host or room.phase != "lobby":
+            return
+        n = m.get("n")
+        if not (isinstance(n, int) and not isinstance(n, bool) and 1 <= n <= 3):
+            return
+        if any(room.slots[i] for i in range(n, 3)):
+            return err(conn, "Há jogadores demais na sala para esse tamanho.")
+        room.size = n
+        for x in room.slots:
+            if x:
+                x.roles = []
+        if LEVELS[room.level]["min"] > n:
+            room.level = next(i for i, lv in enumerate(LEVELS) if lv["min"] <= n)
         room.push_state()
     elif t == "skin":
         me.skin = clean_skin(m.get("id"))
@@ -443,7 +470,9 @@ def handle(conn, m):
         if conn.slot != room.host or room.phase != "lobby":
             return
         n = m.get("n")
-        if isinstance(n, int) and 0 <= n < len(LEVELS):
+        if isinstance(n, int) and not isinstance(n, bool) and 0 <= n < len(LEVELS):
+            if LEVELS[n]["min"] > room.size:
+                return err(conn, f"Essa fase precisa de pelo menos {LEVELS[n]['min']} jogadores.")
             room.level = n
             room.push_state()
     elif t == "start":

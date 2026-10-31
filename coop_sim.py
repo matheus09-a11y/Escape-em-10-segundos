@@ -23,6 +23,7 @@ SPIKE_INSET = 3
 LASER_INSET = 2
 SAW_SLACK = 3
 COUNTDOWN = 3.0
+START_SLOTS = {1: [1], 2: [0, 2], 3: [0, 1, 2]}   # quais pontos de largada cada tamanho de sala usa
 LOSE_PAUSE = 2.2
 WARN = 0.5
 
@@ -59,9 +60,11 @@ def saw_pos(m, t):
 class Sim:
     def __init__(self, level, roles):
         self.lv = level
-        self.roles = list(roles)          # papel de cada vaga (0..2)
+        # papéis de cada vaga: lista de ids (com menos de 3 jogadores, um jogador acumula papéis)
+        self.roles = [[r] if isinstance(r, str) else list(r) for r in roles]
+        self.n = len(self.roles)          # 1..3 jogadores
         self.attempt = 0
-        self.inp = [(0.0, 0.0)] * 3
+        self.inp = [(0.0, 0.0)] * self.n
         self.events = []
         self.reset()
 
@@ -69,8 +72,8 @@ class Sim:
     def reset(self):
         self.attempt += 1
         lv = self.lv
-        self.pos = [[float(s[0]), float(s[1])] for s in lv["starts"]]
-        self.esc = [False] * 3
+        self.pos = [[float(lv["starts"][k][0]), float(lv["starts"][k][1])] for k in START_SLOTS[self.n]]
+        self.esc = [False] * self.n
         self.has_key = False
         self.latched = [False] * len(lv["plates"])
         self.pressed = [False] * len(lv["plates"])
@@ -91,6 +94,8 @@ class Sim:
             self._resume_play = True
 
     def set_input(self, slot, x, y):
+        if not (isinstance(slot, int) and 0 <= slot < self.n):
+            return
         try:
             x, y = float(x), float(y)
         except (TypeError, ValueError):
@@ -172,7 +177,7 @@ class Sim:
         self.t += dt
         closed = self._closed_gates()
         # 1) movimento
-        for i in range(3):
+        for i in range(self.n):
             if self.esc[i]:
                 continue
             ux, uy = self.inp[i]
@@ -180,7 +185,7 @@ class Sim:
                 self._move(self.pos[i], ux * SPEED * dt, uy * SPEED * dt, closed)
         # 2) placas e portas
         for k, pl in enumerate(lv["plates"]):
-            on = any((not self.esc[i]) and math.hypot(self.pos[i][0] - pl["x"], self.pos[i][1] - pl["y"]) < PLATE_R for i in range(3))
+            on = any((not self.esc[i]) and math.hypot(self.pos[i][0] - pl["x"], self.pos[i][1] - pl["y"]) < PLATE_R for i in range(self.n))
             if on != self.pressed[k]:
                 self.pressed[k] = on
                 self.events.append(("plate", k, on))
@@ -194,12 +199,12 @@ class Sim:
         closed = self._closed_gates()
         for g in lv["gates"]:
             if g["r"] in closed:
-                for i in range(3):
+                for i in range(self.n):
                     if not self.esc[i] and circle_rect(self.pos[i][0], self.pos[i][1], PLAYER_R, g["r"]):
                         if not self._eject(i, g, closed):
                             return self._lose(i, "crush")
         # 3) chave e porta de saída
-        for i in range(3):
+        for i in range(self.n):
             if self.esc[i]:
                 continue
             px, py = self.pos[i]
@@ -211,7 +216,7 @@ class Sim:
                 self.esc[i] = True
                 self.events.append(("esc", i))
         # 4) perigos (quem já escapou está a salvo)
-        for i in range(3):
+        for i in range(self.n):
             if self.esc[i]:
                 continue
             why = self._hazard(i)
@@ -229,19 +234,19 @@ class Sim:
 
     def _hazard(self, i):
         lv = self.lv
-        immune = ROLES.get(self.roles[i], {}).get("immune")
+        immune = {ROLES[r]["immune"] for r in self.roles[i] if r in ROLES}
         px, py = self.pos[i]
-        if immune != "spike":
+        if "spike" not in immune:
             for s in lv["spikes"]:
                 if circle_rect(px, py, PLAYER_R, [s[0] + SPIKE_INSET, s[1] + SPIKE_INSET, s[2] - 2 * SPIKE_INSET, s[3] - 2 * SPIKE_INSET]):
                     return "spike"
-        if immune != "laser":
+        if "laser" not in immune:
             for l in lv["lasers"]:
                 if laser_state(l, self.t) == 2:
                     r = l["r"]
                     if circle_rect(px, py, PLAYER_R, [r[0] + LASER_INSET, r[1] + LASER_INSET, r[2] - 2 * LASER_INSET, r[3] - 2 * LASER_INSET]):
                         return "laser"
-        if immune != "saw":
+        if "saw" not in immune:
             for m in lv["saws"]:
                 sx, sy = saw_pos(m, self.t)
                 rr = PLAYER_R + m["r"] - SAW_SLACK
