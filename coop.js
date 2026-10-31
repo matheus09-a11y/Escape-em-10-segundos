@@ -10,6 +10,14 @@
   "use strict";
   const API = window.GameAPI;
   const $ = (id) => document.getElementById(id);
+  // navegadores mais antigos não têm roundRect: sem isto o desenho dava erro e a tela congelava
+  if (window.CanvasRenderingContext2D && !CanvasRenderingContext2D.prototype.roundRect) {
+    CanvasRenderingContext2D.prototype.roundRect = function (x, y, w, h, r) {
+      r = Math.max(0, Math.min(Array.isArray(r) ? r[0] || 0 : r || 0, w / 2, h / 2));
+      this.moveTo(x + r, y); this.arcTo(x + w, y, x + w, y + h, r); this.arcTo(x + w, y + h, x, y + h, r);
+      this.arcTo(x, y + h, x, y, r); this.arcTo(x, y, x + w, y, r); this.closePath();
+    };
+  }
   const panel = $("coop");
   if (!API || !panel) return;
 
@@ -245,7 +253,7 @@
       b.addEventListener("click", () => send({ t: "size", n }));
       sizeEl.appendChild(b);
     }
-    $("co-size-note").textContent = isHost() ? (size < 3 ? "Com menos de 3, cada jogador pode pegar mais de um papel (🔥 💧 🌿)." : "") : "Só o anfitrião escolhe quantos jogam.";
+    $("co-size-note").textContent = isHost() ? (size < 3 ? "Cada jogador escolhe 1 poder. Com menos de 3, sobra poder sem dono: nas fases com perigo, fiquem no corredor do seu poder." : "") : "Só o anfitrião escolhe quantos jogam.";
     const list = $("co-slots"); list.textContent = "";
     r.players.slice(0, size).forEach((p, i) => {
       const li = document.createElement("li");
@@ -261,18 +269,18 @@
       list.appendChild(li);
     });
     const rolesEl = $("co-roles"); rolesEl.textContent = "";
-    $("co-roles-note").textContent = size < 3 ? "Todos os 3 papéis precisam ser escolhidos. Toque de novo para soltar um papel." : "";
+    $("co-roles-note").textContent = "Cada jogador escolhe 1 poder (toque de novo para soltar).";
     for (const id of Object.keys(C.hi ? C.hi.roles : {})) {
       const info = C.hi.roles[id], have = mineRoles.includes(id);
       const takenBy = r.players.findIndex((p, i) => p && i !== C.you && (p.roles || []).includes(id));
       const b = document.createElement("button");
-      b.type = "button"; b.className = "co-role"; b.setAttribute("role", "checkbox"); b.setAttribute("aria-checked", String(have));
+      b.type = "button"; b.className = "co-role"; b.setAttribute("role", "radio"); b.setAttribute("aria-checked", String(have));
       b.disabled = takenBy >= 0 || r.phase !== "lobby";
       b.style.setProperty("--rc", info.color);
       b.innerHTML = `<b></b><span></span><small></small>`;
       b.children[0].textContent = `${info.icon} ${info.name}`;
       b.children[1].textContent = info.desc;
-      b.children[2].textContent = takenBy >= 0 ? `Escolhido por ${r.players[takenBy].name}` : have ? "Seu papel (toque para soltar)" : "Toque para escolher";
+      b.children[2].textContent = takenBy >= 0 ? `Escolhido por ${r.players[takenBy].name}` : have ? "Seu poder (toque para soltar)" : mineRoles.length ? "Toque para trocar" : "Toque para escolher";
       b.addEventListener("click", () => send({ t: "role", role: id }));
       rolesEl.appendChild(b);
     }
@@ -293,8 +301,7 @@
     const missing = seated.filter((p) => !p).length;
     if (missing) why = `Faltam ${missing} jogador${missing > 1 ? "es" : ""}. Mande o código ${r.code}.`;
     else if (seated.some((p) => !p.on)) why = "Um jogador está desconectado.";
-    else if (seated.some((p) => !(p.roles || []).length)) why = "Cada jogador precisa escolher pelo menos um papel.";
-    else if (seated.reduce((n, p) => n + p.roles.length, 0) !== 3) why = "Os 3 papéis (🔥 💧 🌿) precisam estar escolhidos.";
+    else if (seated.some((p) => (p.roles || []).length !== 1)) why = "Cada jogador precisa escolher 1 poder (🔥 💧 🌿).";
     const start = $("co-start");
     start.classList.toggle("hidden", !isHost());
     start.disabled = !!why;
@@ -423,7 +430,10 @@
     C.raf = 0;
     if (C.view !== "game") return;
     const dt = Math.min(0.1, (now - C.lastFrame) / 1000); C.lastFrame = now;
-    draw(now, dt);
+    try { draw(now, dt); } catch (e) { // um erro de desenho nunca pode parar o laço (a tela ficaria congelada)
+      if (!C.drawErr) { C.drawErr = true; console.error("coop draw", e); send({ t: "cerr", m: String(e && e.message || e).slice(0, 120), ua: navigator.userAgent.slice(0, 80) }); }
+      try { ctx.restore(); ctx.restore(); ctx.restore(); } catch (x) {}
+    }
     C.raf = requestAnimationFrame(frame);
   }
   function localElapsed(now) {

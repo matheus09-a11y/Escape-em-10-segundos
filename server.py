@@ -123,6 +123,7 @@ class Conn:
         self.tokens = RATE_PER_SEC * 2
         self.tok_t = time.monotonic()
         self.last_emo = 0.0
+        self.cerr = 0
 
     def send(self, obj):
         if not self.alive:
@@ -241,11 +242,8 @@ class Room:
         ss = self.slots[:self.size]
         if any(x is None or not (x.conn and x.conn.alive) for x in ss):
             return f"Precisamos de {self.size} jogador{'es' if self.size > 1 else ''} conectado{'s' if self.size > 1 else ''}."
-        if any(not x.roles for x in ss):
-            return "Cada jogador precisa escolher pelo menos um papel."
-        claimed = [r for x in ss for r in x.roles]
-        if len(claimed) != len(ROLE_IDS) or set(claimed) != set(ROLE_IDS):
-            return "Os 3 papéis (🔥 💧 🌿) precisam estar escolhidos, cada um por um jogador."
+        if any(len(x.roles) != 1 for x in ss):
+            return "Cada jogador precisa escolher 1 poder."
         need = LEVELS[self.level]["min"]
         if self.size < need:
             return f"Essa fase precisa de pelo menos {need} jogadores."
@@ -440,11 +438,11 @@ def handle(conn, m):
             me.roles = []
         elif r in ROLES:
             if r in me.roles:
-                me.roles.remove(r)
+                me.roles = []
             elif any(x and x is not me and r in x.roles for x in room.slots):
                 return err(conn, "Esse papel já foi escolhido por outro jogador.")
             else:
-                me.roles.append(r)
+                me.roles = [r]          # um poder por jogador: escolher outro troca o anterior
         else:
             return
         room.push_state()
@@ -463,6 +461,10 @@ def handle(conn, m):
         if LEVELS[room.level]["min"] > n:
             room.level = next(i for i, lv in enumerate(LEVELS) if lv["min"] <= n)
         room.push_state()
+    elif t == "cerr":
+        if conn.cerr < 3:       # relatório de erro de desenho do navegador de alguém (ajuda a achar bugs)
+            conn.cerr += 1
+            log("erro no cliente:", str(m.get("m", ""))[:120], "|", str(m.get("ua", ""))[:80])
     elif t == "skin":
         me.skin = clean_skin(m.get("id"))
         room.push_state()
