@@ -26,6 +26,12 @@
   const GATE_COL = ["#19f0ff", "#ff3df2", "#ffd23f", "#39ff88", "#ff8a3d", "#b58cff"];
   const GATE_SYM = ["◆", "●", "▲", "■", "★", "✚"];
   const EXIT_HALF = 36;   // a saída é uma área de 72x72 (igual ao servidor)
+  // ---- movimento: mesma regra do servidor (coop_sim.py) para PREVER o boneco local sem esperar a rede
+  const SPEED = 260, STEP = 3, PLAYER_R = 11, STEPDT = 1 / 60, INTERP = 0.09, EXTRAP_MAX = 0.1;
+  const _D = 0.7071067811865476;
+  const DIRS = [[0, 0], [1, 0], [_D, _D], [0, 1], [-_D, _D], [-1, 0], [-_D, -_D], [0, -1], [_D, -_D]];   // 0 parado, 1..8: E SE S SW W NW N NE
+  // medições reais do painel de diagnóstico (nada aqui é estimado)
+  const D = { on: false, frames: [], rtts: [], snapT: [], rxB: [], cmdMsg: [], cmdN: [], corr: [], stale: 0, dup: 0, lastCorr: 0, worst: 0 };
   const PRESETS = [10, 15, 20, 25, 30, 45, 60];
   const MARKS = [["📍", "Aqui!"], ["🆘", "Preciso de ajuda!"], ["🚪", "Vá para a saída!"]];
   const EMOS = [["👍", "Beleza!"], ["✋", "Espera!"], ["👉", "Vem aqui!"], ["⚠️", "Cuidado!"], ["🔑", "Pega a chave!"], ["🆘", "Preciso de ajuda!"]];
@@ -39,7 +45,7 @@
 
   const C = {
     ws: null, url: "", same: false, probed: false, hi: null, you: null, code: "", token: "", room: null, level: null, roles: [],
-    view: "connect", snap: null, snapAt: 0, off: null, att: 0, marks: [], armed: -1, armT: 0, lastMark: 0, shown: [null, null, null], pose: [null, null, null], emos: [], rtt: null, closing: false, retryTimer: 0, retryStart: 0,
+    view: "connect", snap: null, snapAt: 0, off: null, att: 0, pr: null, hist: [], seq: 1, acc: 0, outbox: [], flushedCode: 0, lastFlush: 0, lastCode: 0, dispOff: { x: 0, y: 0 }, ring: [], lastI: 0, marks: [], armed: -1, armT: 0, lastMark: 0, shown: [null, null, null], pose: [null, null, null], emos: [], rtt: null, closing: false, retryTimer: 0, retryStart: 0,
     lastCount: -1, result: null, loseUntil: 0, loseText: "", lastFrame: 0, raf: 0, sentDir: [0, 0], dirAt: 0, goFlash: 0, pausedBy: -1,
   };
 
@@ -125,6 +131,7 @@
       const to = setTimeout(() => { try { ws.close(); } catch (e) {} reject(new Error("O servidor não respondeu. Se ele estava dormindo, espere um minuto e tente de novo.")); }, 15000);
       let done = false;
       ws.onmessage = (ev) => {
+        D.rxB.push([performance.now(), ev.data.length]);
         let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
         if (!done && m.t === "hi") { done = true; clearTimeout(to); C.ws = ws; C.hi = m; wire(ws); resolve(m); return; }
         if (done) route(m);
@@ -135,7 +142,7 @@
   }
   function wire(ws) {
     clearInterval(wire.ping);
-    wire.ping = setInterval(() => { if (ws.readyState === 1) ws.send(JSON.stringify({ t: "ping", ts: Date.now() })); }, 5000);
+    wire.ping = setInterval(() => { if (ws.readyState === 1) ws.send(JSON.stringify({ t: "ping", ts: Date.now() })); }, 2000);
     ws.send(JSON.stringify({ t: "ping", ts: Date.now() }));
   }
   const send = (o) => { if (C.ws && C.ws.readyState === 1) C.ws.send(JSON.stringify(o)); };
@@ -194,17 +201,18 @@
         break;
       case "room": C.room = m; renderLobby(); updateChips(); updatePaused(); break;
       case "level":
-        C.level = m.level; C.total = m.total; C.roles = m.roles; C.snap = null; C.result = null; C.att = 0; C.shown = [null, null, null]; C.pose = [null, null, null]; C.wonAt = 0; C.emos = []; C.marks = []; C.armed = -1; C.lastCount = -1;
+        C.level = m.level; C.total = m.total; C.roles = m.roles; C.snap = null; C.pr = null; C.hist = []; C.outbox = []; C.ring = []; C.lastI = 0; C.result = null; C.att = 0; C.shown = [null, null, null]; C.pose = [null, null, null]; C.wonAt = 0; C.emos = []; C.marks = []; C.armed = -1; C.lastCount = -1;
         buildChips(); showView("game"); sfx("blip");
         // a fase está pronta neste navegador: avisa o servidor (a contagem só começa quando TODOS avisarem)
-        requestAnimationFrame(() => requestAnimationFrame(() => send({ t: "loaded" })));
+        { let sent = false; const ok = () => { if (!sent) { sent = true; send({ t: "loaded" }); } };
+          requestAnimationFrame(() => requestAnimationFrame(ok)); setTimeout(ok, 600); }   // se a aba estiver em segundo plano o rAF não roda: o aviso sai mesmo assim
         break;
       case "s": onSnap(m); break;
-      case "ev": if (m.a != null && m.a < C.att) break; if (m.a > C.att) C.att = m.a; onEvent(m.e); break;   // evento atrasado de tentativa anterior é descartado
+      case "ev": if (m.i != null) { if (m.i <= C.lastI) { D.dup++; break; } C.lastI = m.i; } if (m.a != null && m.a < C.att) { D.stale++; break; } if (m.a > C.att) C.att = m.a; onEvent(m.e); break;   // evento atrasado de tentativa anterior é descartado
       case "mark": C.marks.push({ s: m.s, k: m.k, x: m.x, y: m.y, until: performance.now() + 5000 }); sfx("blip"); break;
       case "stopped": C.level = null; C.snap = null; C.result = null; C.marks = []; C.armed = -1; if (C.view === "game") showView("lobby"); renderLobby(); banner(m.why || "", m.why && m.why.includes("zeraram") ? "good" : "bad", 9000); break;
       case "emo": C.emos.push({ s: m.s, k: m.k, until: performance.now() + 2500 }); sfx("blip"); break;
-      case "pong": C.rtt = Date.now() - m.ts; $("co-ping").textContent = C.rtt + " ms"; break;
+      case "pong": C.rtt = Date.now() - m.ts; D.rtts.push(C.rtt); if (D.rtts.length > 12) D.rtts.shift(); $("co-ping").textContent = C.rtt + " ms"; break;
       case "err":
         setBusy(false); banner(m.msg, "bad", 5000);
         if (/voltar para a sala/.test(m.msg)) give(m.msg);
@@ -218,12 +226,131 @@
       const off = m.st - performance.now() / 1000;
       if (C.off == null || off > C.off) C.off = off; else C.off += (off - C.off) * 0.01;
     }
-    if (m.a > C.att) { C.att = m.a; C.shown = [null, null, null]; C.pose = [null, null, null]; C.wonAt = 0; hideResult(); }
+    if (m.a > C.att) { C.att = m.a; C.shown = [null, null, null]; C.pose = [null, null, null]; C.wonAt = 0; C.pr = null; C.hist = []; C.outbox = []; C.ring = []; C.dispOff = { x: 0, y: 0 }; C.lastCode = 0; hideResult(); }
     C.snap = m; C.snapAt = performance.now();
+    D.snapT.push(C.snapAt);
+    if (m.st != null) { C.ring.push({ st: m.st, p: m.p }); if (C.ring.length > 24) C.ring.shift(); }
+    if (m.ph !== "play") { C.pr = null; C.hist = []; C.outbox = []; C.lastCode = 0; }
+    else reconcile(m);
     if (prev && prev.ph !== "won" && m.ph === "won") C.wonAt = performance.now();
     if (m.ph === "count" && Math.ceil(m.c) !== C.lastCount) { C.lastCount = Math.ceil(m.c); if (C.lastCount > 0) sfx("tick"); }
     if (m.ph !== "count") C.lastCount = -1;
     updateChips();
+  }
+  /* ------------------------------------------------------------------ painel de diagnóstico (opcional; tudo é MEDIDO neste navegador) */
+  let diagEl = null, diagAt = 0;
+  function toggleDiag(on) {
+    D.on = on == null ? !D.on : on;
+    if (D.on && !diagEl) { diagEl = document.createElement("pre"); diagEl.id = "co-diag"; diagEl.setAttribute("aria-label", "Diagnóstico de rede"); $("co-cwrap").appendChild(diagEl); }
+    if (diagEl) diagEl.classList.toggle("hidden", !D.on);
+  }
+  function updateDiag(now) {
+    if (!D.on || !diagEl || now - diagAt < 250) return; diagAt = now;
+    const win = (arr, ms) => { while (arr.length && now - (Array.isArray(arr[0]) ? arr[0][0] : arr[0]) > ms) arr.shift(); };
+    win(D.snapT, 5000); win(D.rxB, 5000); win(D.cmdMsg, 5000); win(D.cmdN, 5000); win(D.corr, 10000);
+    const fr = D.frames; let fps = "—", worst = "—";
+    if (fr.length > 2) { const recent = fr.filter((t) => now - t < 1000); if (recent.length > 2) { fps = ((recent.length - 1) / ((recent[recent.length - 1] - recent[0]) / 1000)).toFixed(0); let w = 0; for (let i = 1; i < recent.length; i++) w = Math.max(w, recent[i] - recent[i - 1]); worst = w.toFixed(0) + " ms"; } }
+    const rt = D.rtts.slice().sort((a, b) => a - b), med = rt.length ? rt[Math.floor(rt.length / 2)] + " ms" : "—";
+    const per = (arr) => (arr.length / Math.min(5, Math.max(1, (now - (Array.isArray(arr[0]) ? arr[0][0] : arr[0] || now)) / 1000))).toFixed(1);
+    const snapsS = D.snapT.length > 1 ? ((D.snapT.length - 1) / ((D.snapT[D.snapT.length - 1] - D.snapT[0]) / 1000)).toFixed(1) : "—";
+    const bytes = D.rxB.length > 1 ? (D.rxB.reduce((a, x) => a + x[1], 0) / ((D.rxB[D.rxB.length - 1][0] - D.rxB[0][0]) / 1000) / 1024).toFixed(1) + " KB/s" : "—";
+    const cm = D.cmdMsg.length > 1 ? ((D.cmdMsg.length - 1) / ((D.cmdMsg[D.cmdMsg.length - 1] - D.cmdMsg[0]) / 1000)).toFixed(1) : "0";
+    const cn = D.cmdN.reduce((a, x) => a + x[1], 0), cs = D.cmdN.length > 1 ? (cn / ((D.cmdN[D.cmdN.length - 1][0] - D.cmdN[0][0]) / 1000)).toFixed(0) : "0";
+    const cc = D.corr.length, cmean = cc ? (D.corr.reduce((a, x) => a + x[1], 0) / cc).toFixed(1) : "0", cmax = cc ? Math.max(...D.corr.map((x) => x[1])).toFixed(1) : "0";
+    const buf = C.ring.length > 1 && C.off != null ? Math.max(0, C.ring[C.ring.length - 1].st - (now / 1000 + C.off - INTERP)) * 1000 : null;
+    diagEl.textContent = [
+      "DIAGNÓSTICO (medido)",
+      `FPS: ${fps}   pior quadro: ${worst}`,
+      `RTT: ${C.rtt != null ? C.rtt + " ms" : "—"}   mediana(${rt.length}): ${med}`,
+      `quadros do servidor/s: ${snapsS}   recebido: ${bytes}`,
+      `lotes de comando/s: ${cm}   comandos/s: ${cs}`,
+      `correções do boneco local (10 s): ${cc}  média ${cmean} u  máx ${cmax} u  última ${D.lastCorr.toFixed(1)} u`,
+      `comandos a caminho: ${C.hist.length}   buffer de interpolação: ${buf == null ? "—" : buf.toFixed(0) + " ms"}`,
+      `eventos descartados: ${D.stale} antigos, ${D.dup} repetidos`,
+    ].join("\n");
+  }
+  /* ------------------------------------------------------------------ previsão do boneco local */
+  // O servidor continua sendo a autoridade (colisões, placas, portas, morte, vitória, tempo). Aqui só se PREVÊ o movimento do
+  // próprio jogador, com a mesma regra do servidor e usando as portas como o servidor as mostrou: a previsão nunca abre porta,
+  // nem decide morte ou vitória. Cada comando vale 1/60 s e tem número; o servidor responde com o último número aplicado (ak)
+  // e a posição dele; o navegador refaz os comandos ainda não aplicados em cima dessa posição e compara com o que previu.
+  function circleRect(cx, cy, r, rc) {
+    const nx = Math.min(Math.max(cx, rc[0]), rc[0] + rc[2]), ny = Math.min(Math.max(cy, rc[1]), rc[1] + rc[3]);
+    const dx = cx - nx, dy = cy - ny; return dx * dx + dy * dy < r * r;
+  }
+  function closedRects() {
+    const s = C.snap, lv = C.level, out = []; if (!s || !lv) return out;
+    lv.gates.forEach((g, i) => { if (s.g[i] !== 1) out.push(g.r); });
+    return out;
+  }
+  function hitsWall(x, y, closed) {
+    for (const w of C.level.walls) if (circleRect(x, y, PLAYER_R, w)) return true;
+    for (const g of closed) if (circleRect(x, y, PLAYER_R, g)) return true;
+    return false;
+  }
+  function predStep(p, code, closed) {
+    const d = DIRS[code]; if (!d || (!d[0] && !d[1])) return;
+    let ux = d[0], uy = d[1]; const mm = Math.hypot(ux, uy); if (mm > 1) { ux /= mm; uy /= mm; }
+    const dx = ux * SPEED * STEPDT, dy = uy * SPEED * STEPDT, n = Math.max(1, Math.ceil(Math.hypot(dx, dy) / STEP)), sx = dx / n, sy = dy / n;
+    let x = p.x, y = p.y;
+    for (let i = 0; i < n; i++) {
+      if (sx) { const nx = Math.min(Math.max(x + sx, PLAYER_R), W - PLAYER_R); if (!hitsWall(nx, y, closed)) x = nx; }
+      if (sy) { const ny = Math.min(Math.max(y + sy, PLAYER_R), H - PLAYER_R); if (!hitsWall(x, ny, closed)) y = ny; }
+    }
+    p.x = x; p.y = y;
+  }
+  function dirCode() {
+    const d = dir(), dx = d[0], dy = d[1];
+    if (!dx && !dy) return 0;
+    return dx === 1 ? (dy === 0 ? 1 : dy === 1 ? 2 : 8) : dx === -1 ? (dy === 0 ? 5 : dy === 1 ? 4 : 6) : dy === 1 ? 3 : 7;
+  }
+  function reconcile(m) {
+    if (C.you == null || !m.p[C.you]) return;
+    const P = m.p[C.you];
+    if (!C.pr) { C.pr = { x: P[0], y: P[1] }; C.hist = []; C.dispOff = { x: 0, y: 0 }; return; }
+    const ack = m.ak ? m.ak[C.you] : 0, closed = closedRects();
+    while (C.hist.length && C.hist[0][0] <= ack) C.hist.shift();      // comandos que o servidor já aplicou
+    const q = { x: P[0], y: P[1] };
+    for (const c of C.hist) predStep(q, c[1], closed);                // refaz só os que ainda estão a caminho
+    const ex = q.x - C.pr.x, ey = q.y - C.pr.y, e = Math.hypot(ex, ey);
+    if (e > 0.5) { D.corr.push([performance.now(), e]); D.lastCorr = e; }
+    if (e > 40) C.dispOff = { x: 0, y: 0 };                           // posição inválida/teleporte: corrige na hora
+    else { C.dispOff.x -= ex; C.dispOff.y -= ey; }                    // correção pequena: some aos poucos na tela
+    C.pr = q;
+  }
+  function stepInput(now, dt) {
+    const s = C.snap;
+    if (!s || s.ph !== "play" || C.view !== "game" || !C.level || !C.pr) { C.acc = 0; return; }
+    C.acc = Math.min(C.acc + dt, 0.1);
+    const code = dirCode(), closed = closedRects();
+    while (C.acc >= STEPDT) {
+      C.acc -= STEPDT;
+      if (code === 0 && C.lastCode === 0) continue;                    // parado: nada a enviar
+      const sq = C.seq++;
+      predStep(C.pr, code, closed);
+      C.hist.push([sq, code]); C.outbox.push([sq, code]); C.lastCode = code;
+      if (C.hist.length > 120) C.hist.shift();
+    }
+    if (C.outbox.length && (now - C.lastFlush >= 30 || C.outbox[0][1] !== C.flushedCode)) {   // lote a cada ~30 ms; mudança de direção sai na hora
+      send({ t: "mv", s: C.outbox[0][0], d: C.outbox.map((c) => c[1]) });
+      D.cmdMsg.push(now); D.cmdN.push([now, C.outbox.length]);
+      C.flushedCode = C.outbox[C.outbox.length - 1][1]; C.lastFlush = now; C.outbox = [];
+    }
+    const k = Math.exp(-dt / 0.08); C.dispOff.x *= k; C.dispOff.y *= k;
+  }
+  /** Jogadores remotos: interpolação entre dois quadros do servidor, um pouco no passado (INTERP); extrapolação curta e limitada. */
+  function remotePos(i, now) {
+    const r = C.ring; if (r.length < 2 || C.off == null) return null;
+    const rt = now / 1000 + C.off - INTERP;
+    let a = null, b = null;
+    for (let k = r.length - 1; k >= 1; k--) { if (r[k - 1].st <= rt && rt <= r[k].st) { a = r[k - 1]; b = r[k]; break; } }
+    if (a && b) { const f = b.st > a.st ? (rt - a.st) / (b.st - a.st) : 1; return { x: a.p[i][0] + (b.p[i][0] - a.p[i][0]) * f, y: a.p[i][1] + (b.p[i][1] - a.p[i][1]) * f }; }
+    const last = r[r.length - 1], prev = r[r.length - 2];
+    if (rt > last.st) {                                              // faltou atualização: extrapola no máximo EXTRAP_MAX
+      const dtv = Math.min(rt - last.st, EXTRAP_MAX), span = last.st - prev.st || 0.033;
+      return { x: last.p[i][0] + (last.p[i][0] - prev.p[i][0]) / span * dtv, y: last.p[i][1] + (last.p[i][1] - prev.p[i][1]) / span * dtv };
+    }
+    return { x: r[0].p[i][0], y: r[0].p[i][1] };
   }
   function name(i) { const p = C.room && C.room.players[i]; return p ? p.name : "Jogador"; }
   /** Papéis do jogador i (lista). Com menos de 3 jogadores um jogador acumula papéis. */
@@ -399,25 +526,18 @@
     return [(has("r") ? 1 : 0) - (has("l") ? 1 : 0), (has("d") ? 1 : 0) - (has("u") ? 1 : 0)];
   }
   function releaseDir() { keys.clear(); padDirs.clear(); document.querySelectorAll("#co-pad .dir.active").forEach((b) => b.classList.remove("active")); pushDir(true); }
-  function pushDir(force) {
-    let d = C.view === "game" && C.snap && C.snap.ph === "play" ? dir() : [0, 0];
-    const now = performance.now();
-    if (force || d[0] !== C.sentDir[0] || d[1] !== C.sentDir[1] || ((d[0] || d[1]) && now - C.dirAt > 120)) {
-      if (!force || d[0] !== C.sentDir[0] || d[1] !== C.sentDir[1]) send({ t: "in", x: d[0], y: d[1] });
-      C.sentDir = d; C.dirAt = now;
-    }
-  }
-  setInterval(() => { if (C.view === "game") pushDir(false); }, 60);
+  function pushDir() { /* os comandos de movimento saem do laço de quadros (stepInput): numerados, em lote, 1 por 1/60 s */ }
   const typing = (t) => t && t.closest && t.closest("input, textarea, select");
   window.addEventListener("keydown", (e) => {
     if (panel.classList.contains("hidden") || e.ctrlKey || e.metaKey || e.altKey) return;
     if (C.view !== "game") { if (e.code === "Escape" && !typing(e.target)) { e.stopPropagation(); leaveAsk(); } return; }
     if (typing(e.target)) return;
+    if (e.code === "F3") { e.preventDefault(); toggleDiag(); return; }
     if (e.code === "Escape") { e.stopPropagation(); togglePop(); return; }
     if (!$("co-pop").classList.contains("hidden")) return;
     if (KEYMAP[e.code]) { keys.add(KEYMAP[e.code]); e.preventDefault(); pushDir(false); return; }
     if (/^Digit[1-6]$/.test(e.code)) { send({ t: "emo", k: +e.code.slice(5) - 1 }); return; }
-    if (e.code === "KeyR" && isHost() && !e.repeat) { send({ t: "restart" }); }
+    if (e.code === "KeyR" && isHost() && !e.repeat) { send({ t: "restart", a: C.snap ? C.snap.a : undefined }); }
   }, true);
   window.addEventListener("keyup", (e) => { if (KEYMAP[e.code]) { keys.delete(KEYMAP[e.code]); pushDir(false); } }, true);
   window.addEventListener("blur", releaseDir);
@@ -502,6 +622,9 @@
     C.raf = 0;
     if (C.view !== "game") return;
     const dt = Math.min(0.1, (now - C.lastFrame) / 1000); C.lastFrame = now;
+    D.frames.push(now); if (D.frames.length > 130) D.frames.shift();
+    try { updateDiag(now); } catch (e) {}
+    try { stepInput(now, dt); } catch (e) { console.error("coop input", e); }
     try { draw(now, dt); } catch (e) { // um erro de desenho nunca pode parar o laço (a tela ficaria congelada)
       if (!C.drawErr) { C.drawErr = true; console.error("coop draw", e); send({ t: "cerr", m: String(e && e.message || e).slice(0, 120), ua: navigator.userAgent.slice(0, 80) }); }
       try { ctx.restore(); ctx.restore(); ctx.restore(); } catch (x) {}
@@ -629,7 +752,10 @@
       for (let i = 0; i < Math.min(nP(), s.p.length); i++) {
         const tg = s.p[i];
         let sh = C.shown[i];
-        if (!sh || Math.hypot(sh.x - tg[0], sh.y - tg[1]) > 70 || RM()) sh = C.shown[i] = { x: tg[0], y: tg[1] };
+        const rp = i !== C.you ? remotePos(i, now) : null;
+        if (i === C.you && C.pr && s.ph === "play") sh = C.shown[i] = { x: C.pr.x + C.dispOff.x, y: C.pr.y + C.dispOff.y };   // local: previsto, responde na hora
+        else if (rp) sh = C.shown[i] = rp;                                                                                    // remotos: interpolados
+        else if (!sh || Math.hypot(sh.x - tg[0], sh.y - tg[1]) > 70 || RM()) sh = C.shown[i] = { x: tg[0], y: tg[1] };
         else { sh.x += (tg[0] - sh.x) * k; sh.y += (tg[1] - sh.y) * k; }
         const r = roleOf(i), pl = C.room && C.room.players[i], skin = (pl && pl.skin) || "explorer";
         let po = C.pose[i];
@@ -736,6 +862,8 @@
   $("co-pop-continue").addEventListener("click", togglePop);
   $("co-pop-lobby").addEventListener("click", () => { togglePop(); send({ t: "lobby" }); });
   $("co-pop-leave").addEventListener("click", () => { togglePop(); close(true); });
+  { const b = document.createElement("button"); b.type = "button"; b.className = "btn btn-ghost"; b.textContent = "📊 Diagnóstico de rede (liga/desliga)";
+    b.addEventListener("click", () => { toggleDiag(); togglePop(); }); $("co-pop-leave").parentNode.appendChild(b); }
 
   window.OnlineCoop = { open, close, state: C };
 })();

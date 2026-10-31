@@ -309,6 +309,49 @@ async def main():
         for x in q + [late]: x.send(t="leave")
         await asyncio.sleep(0.3)
 
+        print("Comandos numerados de movimento (previsão no navegador, autoridade no servidor)")
+        z = T_ = WS(); await z.connect(); await z.expect("hi")
+        z.send(t="create", name="Solo"); await z.expect("joined"); z.send(t="size", n=1); z.send(t="role", role="onda"); await asyncio.sleep(0.2)
+        z.send(t="level", n=0); z.send(t="limit", v=60); await asyncio.sleep(0.1); z.send(t="ready", v=True); await asyncio.sleep(0.1); z.send(t="start")
+        for _ in range(80):
+            if z.snap and z.snap["ph"] == "play": break
+            await asyncio.sleep(0.1)
+        check("sala de 1 jogador em jogo", z.snap and z.snap["ph"] == "play" and z.snap["ak"] == [0], z.snap)
+        x0, y0 = z.snap["p"][0][0], z.snap["p"][0][1]
+        z.send(t="mv", s=1, d=[1] * 8); await asyncio.sleep(0.5)
+        dx = z.snap["p"][0][0] - x0
+        check("8 comandos de 1/60 s andam 8*260/60 = 34,7 u (nem mais, nem menos)", abs(dx - 34.67) < 1.0, dx)
+        check("o servidor confirma o último comando aplicado (ak = 8)", z.snap["ak"] == [8], z.snap["ak"])
+        z.send(t="mv", s=1, d=[1] * 8); await asyncio.sleep(0.4)
+        check("lote repetido/antigo é descartado (não anda de novo)", abs(z.snap["p"][0][0] - x0 - 34.67) < 1.0 and z.snap["ak"] == [8], (z.snap["p"][0][0] - x0, z.snap["ak"]))
+        z.send(t="mv", s=6, d=[1] * 6); await asyncio.sleep(0.4)       # sobrepõe 6..8 (repetidos) e traz 9..11 (novos)
+        check("lote que sobrepõe: só os números novos valem (3 comandos)", abs(z.snap["p"][0][0] - x0 - 34.67 - 3 * 260 / 60) < 1.0 and z.snap["ak"] == [11], (z.snap["p"][0][0] - x0, z.snap["ak"]))
+        z.send(t="mv", s=12, d=[1] * 12); await asyncio.sleep(0.4)
+        check("rajada maior que a fila (12 de uma vez): vale só o que cabe (8), sem andar a mais", abs(z.snap["p"][0][0] - x0 - 34.67 - 13 - 8 * 260 / 60) < 1.5, z.snap["p"][0][0] - x0)
+        # tentativa de correr mais rápido: 150 comandos de uma vez (a fila só guarda os mais recentes e o servidor aplica 1 por quadro)
+        xa = z.snap["p"][0][0]; ta = time.monotonic()
+        for k in range(15): z.send(t="mv", s=24 + 10 * k, d=[1] * 10)
+        await asyncio.sleep(1.0)
+        moved = z.snap["p"][0][0] - xa; el = time.monotonic() - ta
+        check("não dá para andar mais rápido mandando comandos demais (limite = velocidade normal)", moved <= 260 * el + 6, (moved, 260 * el))
+        for bad in ({"s": "x", "d": [1]}, {"s": 1, "d": "abc"}, {"s": 1, "d": []}, {"s": 5, "d": [99, -3, None, 1.5, True]}, {"s": True, "d": [1]}, {"s": 1, "d": [1] * 500}):
+            z.send(t="mv", **bad)
+        await asyncio.sleep(0.4)
+        check("comandos malformados não derrubam nada", b'"ok":true' in await http("/health") and z.snap["ph"] == "play")
+        z.send(t="mv", s=999999, d=[0]); await asyncio.sleep(0.2)
+        # robô antigo (direção por estado) continua funcionando em outra sala
+        o = WS(); await o.connect(); await o.expect("hi"); o.send(t="create", name="Velho"); await o.expect("joined"); o.send(t="size", n=1); o.send(t="role", role="onda"); await asyncio.sleep(0.2)
+        o.send(t="level", n=0); o.send(t="ready", v=True); await asyncio.sleep(0.1); o.send(t="start")
+        for _ in range(80):
+            if o.snap and o.snap["ph"] == "play": break
+            await asyncio.sleep(0.1)
+        xo = o.snap["p"][0][0]; o.send(t="in", x=1, y=0); await asyncio.sleep(0.5); o.send(t="in", x=0, y=0); await asyncio.sleep(1.2)
+        check("direção por estado (clientes antigos/robôs) continua funcionando", o.snap["p"][0][0] - xo > 80, o.snap["p"][0][0] - xo)
+        # eventos: contador crescente e sem repetição
+        ids = [m["i"] for m in z.evs if "i" in m]
+        check("eventos têm contador crescente sem repetição", ids == sorted(set(ids)) and len(ids) >= 1, ids[:6])
+        z.send(t="leave"); o.send(t="leave"); await asyncio.sleep(0.3)
+
         d = json.loads((await http("/health")).split(b"\r\n\r\n")[1]); print("         estado final:", d)
     finally:
         srv.terminate()

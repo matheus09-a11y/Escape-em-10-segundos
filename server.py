@@ -12,6 +12,7 @@ ALLOWED_ORIGINS (opcional, lista separada por vírgulas; se definida, só essas 
 Nada é gravado em disco. Salas vivem na memória e somem quando todos saem.
 """
 import asyncio
+import collections
 import base64
 import hashlib
 import json
@@ -40,6 +41,9 @@ GRACE_LOBBY = 15.0
 GRACE_PLAY = 30.0
 INPUT_STALE = 0.8            # entrada de direção sem renovar por tanto tempo vira "parado"
 TICK = 1 / 60
+_D = 0.7071067811865476
+DIRS = [(0.0, 0.0), (1.0, 0.0), (_D, _D), (0.0, 1.0), (-_D, _D), (-1.0, 0.0), (-_D, -_D), (0.0, -1.0), (_D, -_D)]
+CMD_QUEUE_MAX = 8            # comandos de movimento aguardando (cada um vale 1/60 s); passar disso descarta os mais antigos
 DEFAULT_LIMIT = 25           # segundos por tentativa (o anfitrião muda no lobby: 5 a 300)
 LIMIT_MIN, LIMIT_MAX = 5, 300
 LOAD_TIMEOUT = 20.0          # quanto esperamos todos carregarem a fase antes de voltar ao lobby
@@ -131,6 +135,9 @@ class Conn:
         self.last_mark = 0.0
 
     def send(self, obj):
+        self.send_raw(ws_frame(1, json.dumps(obj, separators=(",", ":"), ensure_ascii=False).encode()))
+
+    def send_raw(self, frame):
         if not self.alive:
             return
         try:
@@ -138,7 +145,7 @@ class Conn:
             if tr.is_closing() or tr.get_write_buffer_size() > 200_000:   # cliente lento demais: derruba
                 self.close()
                 return
-            self.writer.write(ws_frame(1, json.dumps(obj, separators=(",", ":"), ensure_ascii=False).encode()))
+            self.writer.write(frame)
         except Exception:
             self.close()
 
@@ -185,6 +192,10 @@ class Slot:
         self.dropped = None          # instante da queda (None = conectado)
         self.inp = (0.0, 0.0)
         self.inp_t = 0.0
+        self.mode = "legacy"         # "cmd" depois do primeiro comando numerado (mv)
+        self.cmdq = collections.deque(maxlen=CMD_QUEUE_MAX)
+        self.expect = None           # próximo número de sequência esperado
+        self.ack = 0                 # último comando aplicado pelo servidor
 
 
 class Room:
@@ -201,6 +212,8 @@ class Room:
         self.won_at = None
         self.limit = DEFAULT_LIMIT   # tempo da tentativa, igual para todos (só o anfitrião muda, só no lobby)
         self.load_t0 = None
+        self.evn = 0                 # contador de eventos da sala (o navegador descarta repetidos/antigos)
+        self.last_attempt = 0
         self.created = time.monotonic()
         self.empty_since = None
 
@@ -209,9 +222,10 @@ class Room:
         return [s for s in self.slots if s and s.conn and s.conn.alive]
 
     def broadcast(self, obj, skip=None):
+        frame = ws_frame(1, json.dumps(obj, separators=(",", ":"), ensure_ascii=False).encode())   # serializa UMA vez
         for s in self.slots:
             if s and s.conn and s.conn.alive and s is not skip:
-                s.conn.send(obj)
+                s.conn.send_raw(frame)
 
     def state(self):
         return {
@@ -275,6 +289,8 @@ class Room:
         for s in self.slots:
             if s:
                 s.loaded = False
+                s.cmdq.clear(); s.expect = None; s.ack = 0
+        self.last_attempt = 0
         for s in self.slots:
             if s:
                 s.inp, s.inp_t = (0.0, 0.0), 0.0
@@ -314,6 +330,7 @@ class Room:
         m = sim.snapshot()
         now = time.monotonic()
         m["st"] = round(now, 3)
+        m["ak"] = [(x.ack if x else 0) for x in self.slots[:self.size]]
         if sim.phase == "play":
             m["en"] = round(now + max(0.0, sim.limit - sim.t), 3)
         if sim.phase == "wait":
@@ -337,10 +354,25 @@ class Room:
                     nxt = time.monotonic()
                     await asyncio.sleep(0)
                 now = time.monotonic()
-                # entradas (a direção expira se o cliente parar de renovar)
+                if sim.attempt != self.last_attempt:        # tentativa nova: comandos antigos não valem
+                    self.last_attempt = sim.attempt
+                    for s in self.slots:
+                        if s:
+                            s.cmdq.clear()
+                # entradas: cada comando numerado vale exatamente 1/60 s (1 por quadro do servidor); sem comando = parado.
+                # Navegadores antigos/robôs ainda podem mandar a direção por estado (expira se parar de renovar).
                 for i, s in enumerate(self.slots):
                     if s:
-                        x, y = s.inp if now - s.inp_t < INPUT_STALE else (0.0, 0.0)
+                        if s.mode == "cmd":
+                            if s.cmdq and sim.phase == "play":
+                                s.ack, c = s.cmdq.popleft()
+                                x, y = DIRS[c]
+                            else:
+                                if sim.phase != "play":
+                                    s.cmdq.clear()
+                                x, y = 0.0, 0.0
+                        else:
+                            x, y = s.inp if now - s.inp_t < INPUT_STALE else (0.0, 0.0)
                         sim.set_input(i, x, y)
                 if sim.phase == "wait":
                     # a fase é preparada em todos os navegadores antes da contagem; nenhum tempo corre enquanto isso
@@ -367,12 +399,14 @@ class Room:
                 else:
                     self.won_at = None
                 sim.tick(TICK)
+                had_ev = bool(sim.events)
                 for ev in sim.events:
-                    # cada evento leva o número da tentativa: quem recebe atrasado descarta o da tentativa anterior
-                    self.broadcast({"t": "ev", "a": ev[1] if ev[0] == "start" else sim.attempt, "e": list(ev)})
+                    # cada evento leva o número da tentativa e um contador: quem recebe atrasado/repetido descarta
+                    self.evn += 1
+                    self.broadcast({"t": "ev", "a": ev[1] if ev[0] == "start" else sim.attempt, "i": self.evn, "e": list(ev)})
                 sim.events.clear()
                 n += 1
-                if n % 2 == 0 or sim.phase != before:
+                if n % 2 == 0 or sim.phase != before or had_ev:      # evento (placa/porta/chave): quadro na hora, sem esperar o próximo ciclo
                     self.broadcast(self.snap())
         except asyncio.CancelledError:
             pass
@@ -567,6 +601,24 @@ def handle(conn, m):
         if why:
             return err(conn, why)
         room.start_game()
+    elif t == "mv":
+        # lote de comandos numerados (1 por 1/60 s): {"s": primeiro número, "d": [códigos 0..8]}
+        if room.phase != "playing":
+            return
+        s0, ds = m.get("s"), m.get("d")
+        if not (isinstance(s0, int) and not isinstance(s0, bool) and isinstance(ds, list) and 0 < len(ds) <= 12):
+            return
+        me.mode = "cmd"
+        if me.expect is None or s0 > me.expect:
+            me.expect = s0                      # primeiro lote (ou salto): começa daqui
+        for k, c in enumerate(ds):
+            sq = s0 + k
+            if sq < me.expect:
+                continue                        # repetido/atrasado: descarta
+            if not (isinstance(c, int) and not isinstance(c, bool) and 0 <= c <= 8):
+                c = 0
+            me.cmdq.append((sq, c))
+            me.expect = sq + 1
     elif t == "in":
         if room.phase != "playing":
             return
