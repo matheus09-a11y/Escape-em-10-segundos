@@ -63,6 +63,21 @@ async def http(path, method="GET", raw=None):
     data = await asyncio.wait_for(r.read(-1), 5); w.close()
     return data
 
+async def duo_room(level_mid="duo-1", limit=60):
+    """Sala de Dupla pronta e em jogo: devolve (anfitrião, parceiro). O parceiro fica parado e só mantém a conexão viva."""
+    h, q = WS(), WS()
+    await h.connect(); await q.connect(); await h.expect("hi"); await q.expect("hi")
+    h.send(t="create", name="Host"); j = await h.expect("joined")
+    q.send(t="join", code=j["code"], name="Par"); await q.expect("joined")
+    h.send(t="size", n=2); await asyncio.sleep(0.15)
+    h.send(t="limit", v=limit); h.send(t="level", mid=level_mid); await asyncio.sleep(0.15)
+    h.send(t="ready", v=True); q.send(t="ready", v=True); await asyncio.sleep(0.15)
+    h.send(t="start")
+    for _ in range(80):
+        if h.snap and h.snap["ph"] == "play": break
+        await asyncio.sleep(0.1)
+    return h, q
+
 async def main():
     here = os.path.dirname(os.path.abspath(__file__))
     env = dict(os.environ, PORT=str(PORT), HOST="127.0.0.1")
@@ -84,7 +99,7 @@ async def main():
         print("WebSocket e salas")
         a, b, c = WS(), WS(), WS()
         for x in (a, b, c): check("handshake 101", await x.connect())
-        hi = await a.expect("hi"); check("hello traz catálogo de fases e papéis", hi and len(hi["levels"]) == 17 and set(hi["roles"]) == {"brasa", "onda", "folha"})
+        hi = await a.expect("hi"); cat = hi["levels"]; BYMID = {x["mid"]: k for k, x in enumerate(cat)}; check("hello traz catálogo de fases e papéis", hi and len(hi["levels"]) == 20 and set(hi["roles"]) == {"brasa", "onda", "folha"})
         b.send(t="join", code="ZZZZ", name="x"); e = await b.expect("err"); check("sala inexistente dá erro", e and "não encontrada" in e["msg"])
         a.send(t="create", name="Ana", skin="robot"); j = await a.expect("joined"); check("criar sala devolve código de 4 letras", j and len(j["code"]) == 4 and j["you"] == 0)
         code = j["code"]
@@ -103,6 +118,8 @@ async def main():
         b.send(t="start"); e = await b.expect("err", 0.5); check("só o anfitrião começa (silencioso)", e is None and (a.level is None))
         a.send(t="level", n=99); a.send(t="level", n="x"); await asyncio.sleep(0.1)
         check("fase inválida ignorada", a.room["level"] == 0)
+        await asyncio.sleep(0.2)
+        while not a.q.empty(): a.q.get_nowait()
         a.send(t="start"); e = await a.expect("err"); check("não começa sem todos prontos", e and "prontos" in e["msg"], e)
         for x in (a, b, c): x.send(t="ready", v=True)
         await asyncio.sleep(0.2)
@@ -176,44 +193,52 @@ async def main():
         b.send(t="leave"); await asyncio.sleep(0.3)
         check("quem sai libera a vaga", a.room["players"][1] is None)
         a.send(t="leave"); c3.send(t="leave"); await asyncio.sleep(0.3)
-        print("Sala com menos de 3 jogadores")
-        for x in (a, b, c): x.send(t="leave")
-        await asyncio.sleep(0.4)
+        print("Modalidade Dupla: capacidade 2, mapas só de dupla, troca segura")
         p1, p2, p3 = WS(), WS(), WS()
         for x in (p1, p2, p3): await x.connect(); await x.expect("hi")
         p1.send(t="create", name="Ana"); j = await p1.expect("joined"); code2 = j["code"]
-        check("sala nova começa com tamanho 3", p1.room and p1.room["size"] == 3, p1.room)
+        check("sala nova começa em Trio (3) e mostra a modalidade a todos", p1.room and p1.room["size"] == 3 and "Trio" in p1.room["modality"], p1.room)
         p2.send(t="join", code=code2, name="Bia"); await p2.expect("joined")
-        p2.send(t="size", n=1); await asyncio.sleep(0.15); check("só o anfitrião muda o tamanho", p1.room["size"] == 3)
-        p1.send(t="size", n=1); e = await p1.expect("err"); check("não reduz com gente demais", e and "demais" in e["msg"] and p1.room["size"] == 3, e)
-        p1.send(t="size", n=2); await asyncio.sleep(0.15); check("anfitrião define 2 jogadores", p1.room["size"] == 2 and p2.room["size"] == 2)
-        p3.send(t="join", code=code2, name="Caio"); e = await p3.expect("err"); check("terceiro é recusado: sala de 2", e and "cheia (2 jogadores)" in e["msg"], e)
-        p1.send(t="level", n=3); e = await p1.expect("err"); check("fase que exige 3 é recusada numa sala de 2", e and "pelo menos 3" in e["msg"], e)
-        p1.send(t="start"); e = await p1.expect("err"); check("não começa sem papéis", e and "1 poder" in e["msg"], e)
-        p1.send(t="role", role="brasa"); p1.send(t="role", role="onda"); p2.send(t="role", role="folha"); await asyncio.sleep(0.2)
-        check("cada jogador fica com 1 poder (escolher outro troca)", p1.room["players"][0]["roles"] == ["onda"] and p2.room["players"][1]["roles"] == ["folha"], p1.room)
-        p2.send(t="role", role="onda"); e = await p2.expect("err"); check("poder já escolhido continua recusado", e and "já foi escolhido" in e["msg"], e)
-        p1.send(t="role", role="onda"); await asyncio.sleep(0.15); p1.send(t="start"); e = await p1.expect("err")
-        check("sem poder escolhido não começa", e and "1 poder" in e["msg"], e)
-        p1.send(t="role", role="brasa"); await asyncio.sleep(0.15)
-        p1.send(t="level", n=2); await asyncio.sleep(0.1); check("fase 3 (exige 2) liberada para 2 jogadores", p1.room["level"] == 2, p1.room)
-        p1.send(t="ready", v=True); p2.send(t="ready", v=True); await asyncio.sleep(0.15)
-        p1.send(t="start"); await asyncio.sleep(0.5)
-        check("começa com 2 jogadores e papéis por jogador", p1.level and p1.level["roles"] == [["brasa"], ["folha"]] and p1.level.get("size") == 2, p1.level)
+        p2.send(t="size", n=2); await asyncio.sleep(0.15); check("só o anfitrião muda a modalidade", p1.room["size"] == 3)
+        for bad in (1, 4, 0, -2, "x", None, 2.5, True):
+            p1.send(t="size", n=bad)
+        await asyncio.sleep(0.3)
+        check("modalidades inválidas (1, 4, texto, decimal, booleano) são recusadas", p1.room["size"] == 3)
+        while not p1.q.empty(): p1.q.get_nowait()
+        p3.send(t="join", code=code2, name="Caio"); await p3.expect("joined"); await asyncio.sleep(0.15)
+        p1.send(t="size", n=2); e = await p1.expect("err"); check("com 3 participantes presentes não dá para virar Dupla (explica o motivo)", e and "alguém precisa sair" in e["msg"] and p1.room["size"] == 3, e)
+        p3.send(t="leave"); await asyncio.sleep(0.3)
+        p1.send(t="level", mid="classic-1"); await asyncio.sleep(0.1); p1.send(t="ready", v=True); p2.send(t="ready", v=True); await asyncio.sleep(0.2)
+        p1.send(t="size", n=2); await asyncio.sleep(0.3)
+        check("virou Dupla: todos veem a nova modalidade", p1.room["size"] == 2 and p2.room["size"] == 2 and "Dupla" in p2.room["modality"], p2.room)
+        check("o mapa de Trio escolhido foi desmarcado (nunca fica um mapa da outra modalidade)", p1.room["level"] is None and p2.room["level"] is None, p1.room["level"])
+        check("o 'pronto' de todos foi invalidado", not any(p["ready"] for p in p1.room["players"] if p), p1.room["players"])
+        check("a lista de mapas da sala só tem mapas de 2 jogadores (igual para todos)", p1.room["maps"] == p2.room["maps"] and all(cat[i]["players"] == 2 for i in p1.room["maps"]) and len(p1.room["maps"]) == 9, p1.room["maps"])
+        p1.send(t="start"); e = await p1.expect("err"); check("sem mapa escolhido não começa", e and "Escolha um mapa" in e["msg"], e)
+        p3b = WS(); await p3b.connect(); await p3b.expect("hi"); p3b.send(t="join", code=code2, name="Caio"); e = await p3b.expect("err"); check("terceiro é recusado: a Dupla tem 2 vagas", e and "cheia (2 jogadores)" in e["msg"], e)
+        p3b.send(t="leave")
+        for ref in (dict(n=3), dict(id=4), dict(mid="classic-4"), dict(n=11), dict(mid="trio-6"), dict(id=17)):
+            p1.send(t="level", **ref); e = await p1.expect("err")
+            check(f"mapa de Trio por {list(ref.items())[0]} é rejeitado pela autoridade", e and "exatamente 3" in e["msg"] and p1.room["level"] is None, e)
+        for ref in (dict(n=999), dict(id=0), dict(id=99), dict(mid="nao-existe"), dict(n=-1), dict(n="x")):
+            p1.send(t="level", **ref); e = await p1.expect("err", 0.6)
+            check(f"identificador inválido {list(ref.items())[0]} é rejeitado", (e is not None) or ref.get("n") in (-1, "x") and p1.room["level"] is None)
+        p1.send(t="level", mid="classic-3-duo"); await asyncio.sleep(0.2)
+        check("mapa de Dupla (classic-3-duo) é aceito e visto por todos", p1.room["level"] == BYMID["classic-3-duo"] == p2.room["level"], p2.room["level"])
+        p1.send(t="ready", v=True); p2.send(t="ready", v=True); await asyncio.sleep(0.2); p1.send(t="start"); await asyncio.sleep(0.8)
+        check("Dupla começa com os papéis 🔥 e 💧 e 2 jogadores", p1.level and p1.level["roles"] == [["brasa"], ["onda"]] and p1.level["level"]["players"] == 2, p1.level and p1.level["roles"])
         for _ in range(60):
             if p1.snap and p1.snap["ph"] == "play": break
             await asyncio.sleep(0.1)
         check("snapshot tem só 2 jogadores", p1.snap and len(p1.snap["p"]) == 2, p1.snap)
-        p3.send(t="join", code=code2, name="Caio"); e = await p3.expect("err"); check("sala já começou: entrada recusada", e is not None)
-        p1.send(t="lobby"); await asyncio.sleep(0.2)
-        p1.send(t="size", n=1); e = await p1.expect("err", 0.4)
-        p2.send(t="leave"); await asyncio.sleep(0.2)
-        p1.send(t="size", n=1); await asyncio.sleep(0.2); check("sozinho, anfitrião define sala de 1", p1.room["size"] == 1 and p1.room["level"] != 2, p1.room)
-        p1.send(t="role", role="onda"); await asyncio.sleep(0.2)
-        p1.send(t="level", n=0); p1.send(t="ready", v=True); await asyncio.sleep(0.1); p1.send(t="start"); await asyncio.sleep(0.5)
-        check("começa sozinho com 1 poder", p1.level and p1.level["roles"] == [["onda"]], p1.level)
-        for x in (p1, p2, p3): x.send(t="leave")
-        await asyncio.sleep(0.3)
+        # durante uma tentativa não dá para trocar modalidade nem mapa
+        p1.send(t="size", n=3); p1.send(t="level", mid="duo-1"); await asyncio.sleep(0.3)
+        check("durante a tentativa a modalidade e o mapa ficam travados", p1.room["size"] == 2 and p1.room["level"] == BYMID["classic-3-duo"], p1.room)
+        # desconexão: a Dupla NÃO vira outra coisa; todos voltam ao lobby esperando
+        p2.w.close(); await asyncio.sleep(0.6)
+        check("queda de um jogador da Dupla: volta ao lobby, continua Dupla e não aceita começar com 1", p1.room["phase"] == "lobby" and p1.room["size"] == 2 and p1.room["players"][1]["on"] is False, p1.room)
+        p1.send(t="ready", v=True); await asyncio.sleep(0.1); p1.send(t="start"); e = await p1.expect("err"); check("não começa com 1 conectado numa Dupla", e and "exatamente 2" in e["msg"], e)
+        p1.send(t="leave"); await asyncio.sleep(0.3)
 
         print("Tempo configurável, prontos, carga sincronizada, tentativas e marcações (3 clientes)")
         q = [WS() for _ in range(3)]
@@ -310,52 +335,43 @@ async def main():
         await asyncio.sleep(0.3)
 
         print("Comandos numerados de movimento (previsão no navegador, autoridade no servidor)")
-        z = T_ = WS(); await z.connect(); await z.expect("hi")
-        z.send(t="create", name="Solo"); await z.expect("joined"); z.send(t="size", n=1); z.send(t="role", role="onda"); await asyncio.sleep(0.2)
-        z.send(t="level", n=0); z.send(t="limit", v=60); await asyncio.sleep(0.1); z.send(t="ready", v=True); await asyncio.sleep(0.1); z.send(t="start")
-        for _ in range(80):
-            if z.snap and z.snap["ph"] == "play": break
-            await asyncio.sleep(0.1)
-        check("sala de 1 jogador em jogo", z.snap and z.snap["ph"] == "play" and z.snap["ak"] == [0], z.snap)
+        z, zp = await duo_room("duo-1", 60)
+        check("Dupla em jogo", z.snap and z.snap["ph"] == "play" and z.snap["ak"] == [0, 0], z.snap)
         x0, y0 = z.snap["p"][0][0], z.snap["p"][0][1]
         z.send(t="mv", s=1, d=[1] * 8); await asyncio.sleep(0.5)
         dx = z.snap["p"][0][0] - x0
         check("8 comandos de 1/60 s andam 8*260/60 = 34,7 u (nem mais, nem menos)", abs(dx - 34.67) < 1.0, dx)
-        check("o servidor confirma o último comando aplicado (ak = 8)", z.snap["ak"] == [8], z.snap["ak"])
+        check("o servidor confirma o último comando aplicado (ak = 8)", z.snap["ak"][0] == 8, z.snap["ak"])
         z.send(t="mv", s=1, d=[1] * 8); await asyncio.sleep(0.4)
-        check("lote repetido/antigo é descartado (não anda de novo)", abs(z.snap["p"][0][0] - x0 - 34.67) < 1.0 and z.snap["ak"] == [8], (z.snap["p"][0][0] - x0, z.snap["ak"]))
+        check("lote repetido/antigo é descartado (não anda de novo)", abs(z.snap["p"][0][0] - x0 - 34.67) < 1.0 and z.snap["ak"][0] == 8, (z.snap["p"][0][0] - x0, z.snap["ak"]))
         z.send(t="mv", s=6, d=[1] * 6); await asyncio.sleep(0.4)       # sobrepõe 6..8 (repetidos) e traz 9..11 (novos)
-        check("lote que sobrepõe: só os números novos valem (3 comandos)", abs(z.snap["p"][0][0] - x0 - 34.67 - 3 * 260 / 60) < 1.0 and z.snap["ak"] == [11], (z.snap["p"][0][0] - x0, z.snap["ak"]))
+        check("lote que sobrepõe: só os números novos valem (3 comandos)", abs(z.snap["p"][0][0] - x0 - 34.67 - 3 * 260 / 60) < 1.0 and z.snap["ak"][0] == 11, (z.snap["p"][0][0] - x0, z.snap["ak"]))
         z.send(t="mv", s=12, d=[1] * 12); await asyncio.sleep(0.4)
         check("rajada maior que a fila (12 de uma vez): vale só o que cabe (8), sem andar a mais", abs(z.snap["p"][0][0] - x0 - 34.67 - 13 - 8 * 260 / 60) < 1.5, z.snap["p"][0][0] - x0)
         # tentativa de correr mais rápido: 150 comandos de uma vez (a fila só guarda os mais recentes e o servidor aplica 1 por quadro)
-        xa = z.snap["p"][0][0]; ta = time.monotonic()
-        for k in range(15): z.send(t="mv", s=24 + 10 * k, d=[1] * 10)
+        xa = z.snap["p"][0][1]; ta = time.monotonic()
+        for k in range(15): z.send(t="mv", s=24 + 10 * k, d=[3] * 10)
         await asyncio.sleep(1.0)
-        moved = z.snap["p"][0][0] - xa; el = time.monotonic() - ta
-        check("não dá para andar mais rápido mandando comandos demais (limite = velocidade normal)", moved <= 260 * el + 6, (moved, 260 * el))
+        moved = z.snap["p"][0][1] - xa; el = time.monotonic() - ta
+        check("não dá para andar mais rápido mandando comandos demais (limite = velocidade normal)", 20 < moved <= 260 * el + 6, (moved, 260 * el))
         for bad in ({"s": "x", "d": [1]}, {"s": 1, "d": "abc"}, {"s": 1, "d": []}, {"s": 5, "d": [99, -3, None, 1.5, True]}, {"s": True, "d": [1]}, {"s": 1, "d": [1] * 500}):
             z.send(t="mv", **bad)
         await asyncio.sleep(0.4)
         check("comandos malformados não derrubam nada", b'"ok":true' in await http("/health") and z.snap["ph"] == "play")
         z.send(t="mv", s=999999, d=[0]); await asyncio.sleep(0.2)
         # robô antigo (direção por estado) continua funcionando em outra sala
-        o = WS(); await o.connect(); await o.expect("hi"); o.send(t="create", name="Velho"); await o.expect("joined"); o.send(t="size", n=1); o.send(t="role", role="onda"); await asyncio.sleep(0.2)
-        o.send(t="level", n=0); o.send(t="ready", v=True); await asyncio.sleep(0.1); o.send(t="start")
-        for _ in range(80):
-            if o.snap and o.snap["ph"] == "play": break
-            await asyncio.sleep(0.1)
+        o, op = await duo_room("duo-1", 60)
         xo = o.snap["p"][0][0]; o.send(t="in", x=1, y=0); await asyncio.sleep(0.5); o.send(t="in", x=0, y=0); await asyncio.sleep(1.2)
         check("direção por estado (clientes antigos/robôs) continua funcionando", o.snap["p"][0][0] - xo > 80, o.snap["p"][0][0] - xo)
         # eventos: contador crescente e sem repetição
         ids = [m["i"] for m in z.evs if "i" in m]
         check("eventos têm contador crescente sem repetição", ids == sorted(set(ids)) and len(ids) >= 1, ids[:6])
-        z.send(t="leave"); o.send(t="leave"); await asyncio.sleep(0.3)
+        z.send(t="leave"); o.send(t="leave"); zp.send(t="leave"); op.send(t="leave"); await asyncio.sleep(0.3)
 
         print("Conjuntos Dupla e Trio: exatamente 2 / 3 jogadores, papéis fixos, partida de ponta a ponta")
         cat = hi["levels"]
-        check("catálogo: 5 clássicas, 6 de Dupla (2 jogadores) e 6 de Trio (3 jogadores)", [x["set"] for x in cat].count("classic") == 5 and [x["players"] for x in cat if x["set"] == "duo"] == [2] * 6 and [x["players"] for x in cat if x["set"] == "trio"] == [3] * 6)
-        duo_i, trio_i = next(k for k, x in enumerate(cat) if x["set"] == "duo"), next(k for k, x in enumerate(cat) if x["set"] == "trio")
+        check("catálogo: 9 mapas de Dupla (2 jogadores) e 11 de Trio (3 jogadores), cada um com UMA quantidade exata", sum(1 for x in cat if x["players"] == 2) == 9 and sum(1 for x in cat if x["players"] == 3) == 11 and all(x["players"] in (2, 3) for x in cat))
+        duo_i, trio_i = BYMID["duo-1"], BYMID["trio-1"]
         g = [WS() for _ in range(3)]
         for x in g: await x.connect(); await x.expect("hi")
         g[0].send(t="create", name="G0"); j = await g[0].expect("joined"); cg = j["code"]
@@ -445,9 +461,7 @@ async def main():
         await asyncio.sleep(0.3)
 
         print("Várias tentativas seguidas: sem eventos duplicados")
-        u = WS(); await u.connect(); await u.expect("hi")
-        u.send(t="create", name="Rep"); await u.expect("joined"); u.send(t="size", n=1); u.send(t="role", role="onda"); await asyncio.sleep(0.1)
-        u.send(t="limit", v=5); u.send(t="level", n=0); await asyncio.sleep(0.1); u.send(t="ready", v=True); await asyncio.sleep(0.1); u.send(t="start")
+        u, up = await duo_room("duo-1", 5)
         end = time.monotonic() + 36
         while time.monotonic() < end and not (u.snap and u.snap["a"] >= 4):
             await asyncio.sleep(0.3)
@@ -459,7 +473,7 @@ async def main():
         check("contador de eventos estritamente crescente (nenhum repetido)", ids == sorted(set(ids)), ids[:10])
         check("exatamente uma derrota por tentativa já terminada", sorted(m["a"] for m in loses) == list(range(1, len(loses) + 1)) and len(loses) >= att - 1, [(m["a"]) for m in loses])
         check("exatamente um 'início' por tentativa", [m["a"] for m in starts] == sorted(set(m["a"] for m in starts)), [m["a"] for m in starts])
-        u.send(t="leave"); await asyncio.sleep(0.3)
+        u.send(t="leave"); up.send(t="leave"); await asyncio.sleep(0.3)
 
         d = json.loads((await http("/health")).split(b"\r\n\r\n")[1]); print("         estado final:", d)
     finally:

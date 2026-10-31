@@ -73,3 +73,26 @@ Não há contas nem moderação: quem tem o código entra na sala (3 vagas).
 - **Dupla** (6 fases, exatamente 2 jogadores) e **Trio** (6 fases, exatamente 3 jogadores), além das 5 clássicas. Papéis fixos por ordem de
   vaga (1º 🔥, 2º 💧, 3º 🌿). A sala recusa iniciar com a quantidade errada e explica o requisito. Depois de vencer, segue para a próxima
   fase do mesmo conjunto. `python3 test_fases.py` confere estrutura, alcance, vitória de robôs e 25 execuções perturbadas por fase.
+
+## Modalidade, mapas por quantidade e Expedição
+
+- **Modalidade** (Dupla = 2 jogadores, Trio = 3): o anfitrião escolhe no lobby; ela define a capacidade da sala e a lista de mapas.
+  Só muda fora de uma tentativa; ao mudar, o "pronto" de todos é desfeito e o mapa escolhido é desmarcado se for da outra modalidade.
+  Com 3 participantes (inclusive quem caiu) a sala recusa virar Dupla e explica; nunca expulsa ninguém. Uma queda não transforma Trio em
+  Dupla: o grupo volta ao lobby e espera. Começar exige exatamente a quantidade da modalidade, todos conectados e prontos.
+- **Filtro obrigatório no servidor** (`coop_levels.compatible`, usado em `level`, `start`, `advance`, `size`, expedição e checkpoint): cada
+  mapa tem `players` exato (2 ou 3); o servidor rejeita mapa de outra quantidade mesmo que o navegador peça (por índice, `id` numérico ou `mid`).
+  A lista `maps` do estado da sala é a única fonte da lista que todos veem. Não existe modalidade de 1 jogador.
+- **Classificação** (por funcionamento real, `test_mapas.py` / `test_fases.py`): Trio = clássicas 1-5 (a 4, "Em dupla", exige 3: duas placas
+  seguradas ao mesmo tempo + 1 que passa) + 6 novas; Dupla = 6 novas + variantes `classic-1-duo`, `classic-2-duo`, `classic-3-duo` (mesmo desenho,
+  2 largadas, papéis fixos, id próprio 18-20). Ids antigos 1..17 preservados; `mid` é o id textual estável.
+- **Expedição**: 6 fases da modalidade em ordem crescente (Dupla: duo-1, duo-2, duo-4, duo-3, duo-6, duo-5; Trio: trio-1, trio-3, trio-2, trio-6, trio-4,
+  trio-5), com o tempo escolhido; derrota reinicia só a fase atual; vitória mostra o resultado e **cada jogador confirma "Pronto para continuar"**
+  (`cont` com o número da tela `rid`: repetido/antigo/de outra tela é ignorado); a próxima fase só começa com todos confirmados, carregados e a
+  contagem de 3 s. Estatísticas: tempo ativo (só tempo de jogo), derrotas por fase e totais. Mudar o tempo ou a modalidade recomeça a expedição
+  (resultados de configurações diferentes nunca se misturam). No fim: repetir ou voltar ao lobby (só o anfitrião).
+- **Checkpoint** (`ckpt`, enviado só ao anfitrião e só ao concluir cada fase, nunca por quadro): `{v, seq:{id,ver}, mod, limit, next, stats}`.
+  É guardado **somente no navegador do anfitrião** (localStorage) — o servidor gratuito não tem disco permanente. Ao continuar, o servidor valida
+  tudo (versão, sequência, modalidade, tempo, fases e totais) e recusa o que for antigo/incompatível. A fase pendente recomeça do começo (sem posições).
+  O progresso também fica na memória da sala enquanto ela existir (queda de alguém não perde a expedição). Novos participantes podem entrar: o
+  checkpoint pertence à expedição e não comprova que cada pessoa jogou as fases anteriores.

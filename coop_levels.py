@@ -320,31 +320,88 @@ MIN_PLAYERS = [1, 1, 2, 3, 3]
 # menor tempo (s) em que um robô perfeito conclui a fase (medido em test_coop.py): abaixo disso é impossível
 PAR = [3, 4, 6, 6, 10]
 NEW_PAR = [5, 5, 5, 3, 6, 5, 5, 5, 5, 8, 9, 5]     # fases 6..17 (Dupla e Trio)
+import copy
+
+# ----------------------------------------------------------------------------------------------
+# CLASSIFICAÇÃO DOS MAPAS (por funcionamento real, não pelo nome)
+#   Cada mapa tem `players` = quantidade EXATA de jogadores para a qual ele foi feito e foi verificado (test_fases.py):
+#     - "Em dupla" (clássica 4) tem esse nome, mas exige 3 (duas placas seguradas ao mesmo tempo + 1 que passa) -> Trio.
+#     - Clássicas 1, 2 e 3 foram desenhadas com 3 largadas -> Trio. Cada uma também tem uma VARIANTE de Dupla
+#       (mesmo desenho, 2 largadas, papéis fixos), com identificador próprio: classic-N-duo.
+#   O servidor só aceita mapa cujo `players` seja igual à capacidade da sala (modalidade), em qualquer caminho.
+#   Identificadores antigos preservados: `id` = posição histórica 1..17 (as variantes novas são 18..20); `mid` é o
+#   identificador textual estável usado em checkpoints.
+# ----------------------------------------------------------------------------------------------
+MIN_PLAYERS = [1, 1, 2, 3, 3]         # só informativo: menor grupo com o qual o desenho clássico funciona (testado)
+PAR = [3, 4, 6, 6, 10]                # menor tempo (s) do robô perfeito (test_coop.py), arredondado para cima
+NEW_PAR = [5, 5, 5, 3, 6, 5, 5, 5, 5, 8, 9, 5]     # fases 6..17 (test_fases.py)
 for i, lv in enumerate(LEVELS):
-    lv.update({"set": "classic", "players": None, "fixed": False, "min": MIN_PLAYERS[i], "par": PAR[i],
-               "intro": lv["hint"]})
+    lv.update({"set": "classic", "group": "classic", "players": 3, "fixed": False, "min": MIN_PLAYERS[i], "par": PAR[i],
+               "intro": lv["hint"], "mid": f"classic-{i + 1}", "family": f"classic-{i + 1}", "variant_of": None})
 LEVELS.extend(NEW_LEVELS)
 for i, lv in enumerate(LEVELS):
     lv["id"] = i + 1
-    if lv["set"] != "classic":
+    if i >= 5:
         lv.setdefault("time", 25)
         lv["fixed"] = True                  # papéis definidos pela fase (por ordem de vaga)
         lv["min"] = lv["players"]
-        lv["par"] = NEW_PAR[i - 5]       # menor tempo do robô perfeito (test_fases.py), arredondado para cima
+        lv["par"] = NEW_PAR[i - 5]
         lv["intro"] = lv["hint"]
         lv["roles"] = ROLE_IDS[:lv["players"]]
+        lv["group"] = "new"
+        lv["mid"] = ("duo-%d" % (i - 4)) if lv["set"] == "duo" else ("trio-%d" % (i - 10))
+        lv["family"] = lv["mid"]; lv["variant_of"] = None
+
+# Variantes de Dupla das clássicas 1, 2 e 3 (identificadores próprios; os originais continuam sendo de Trio)
+_DUO_VARIANTS = [
+    (0, [[60, 110], [60, 390]], "Primeiros passos (dupla)", 3),
+    (1, [[50, 100], [50, 250]], "Cada um no seu caminho (dupla)", 4),
+    (2, [[60, 110], [60, 390]], "Segure a porta (dupla)", 6),
+]
+for src, starts, nm, par in _DUO_VARIANTS:
+    v = copy.deepcopy(LEVELS[src])
+    v.update({"starts": starts, "name": nm, "players": 2, "fixed": True, "roles": ROLE_IDS[:2], "min": 2, "par": par,
+              "mid": LEVELS[src]["mid"] + "-duo", "family": LEVELS[src]["mid"], "variant_of": LEVELS[src]["mid"], "set": "classic", "group": "classic"})
+    v["id"] = len(LEVELS) + 1
+    LEVELS.append(v)
+for lv in LEVELS:
+    lv["modality"] = "duo" if lv["players"] == 2 else "trio"
+
+BY_MID = {lv["mid"]: i for i, lv in enumerate(LEVELS)}
+# ordem de exibição e de "próxima fase" por modalidade (classicas primeiro, depois as novas)
+ORDER = {2: [BY_MID[k] for k in ("classic-1-duo", "classic-2-duo", "classic-3-duo", "duo-1", "duo-2", "duo-3", "duo-4", "duo-5", "duo-6")],
+         3: [BY_MID[k] for k in ("classic-1", "classic-2", "classic-3", "classic-4", "classic-5", "trio-1", "trio-2", "trio-3", "trio-4", "trio-5", "trio-6")]}
+
+# EXPEDIÇÃO: 6 fases da modalidade, em ordem de dificuldade crescente (mecânicas usadas + tempo do robô perfeito)
+EXPEDITIONS = {
+    2: {"id": "expedicao-dupla", "ver": 1, "mids": ["duo-1", "duo-2", "duo-4", "duo-3", "duo-6", "duo-5"]},
+    3: {"id": "expedicao-trio", "ver": 1, "mids": ["trio-1", "trio-3", "trio-2", "trio-6", "trio-4", "trio-5"]},
+}
+for _n, _e in EXPEDITIONS.items():
+    _e["maps"] = [BY_MID[k] for k in _e["mids"]]
+    assert all(LEVELS[i]["players"] == _n for i in _e["maps"]) and len(_e["maps"]) == 6
 
 
 def public(lv):
     """O que o cliente precisa para desenhar a fase (cópia sem nada interno)."""
-    keys = ("id", "name", "time", "min", "par", "set", "players", "fixed", "roles", "intro", "hint", "starts", "walls", "spikes", "lasers", "saws", "plates", "gates", "key", "door")
+    keys = ("id", "mid", "name", "time", "min", "par", "set", "group", "players", "modality", "fixed", "roles", "intro", "hint", "starts", "walls", "spikes", "lasers", "saws", "plates", "gates", "key", "door")
     return {k: lv.get(k) for k in keys}
 
 
 def compatible(lv, n):
-    """A fase serve para uma sala de n jogadores? Clássicas: n >= mínimo. Dupla/Trio: exatamente n."""
-    return lv["min"] <= n if lv["set"] == "classic" else lv["players"] == n
+    """O mapa serve para uma sala de n jogadores? Só se foi feito para EXATAMENTE n."""
+    return lv["players"] == n
+
+
+def maps_for(n):
+    """Índices dos mapas da modalidade de n jogadores, na ordem de exibição (lista vazia se não houver)."""
+    return list(ORDER.get(n, []))
 
 
 def catalog():
-    return [{"id": lv["id"], "name": lv["name"], "time": lv["time"], "min": lv["min"], "par": lv["par"], "set": lv["set"], "players": lv["players"], "name2": lv["name"]} for lv in LEVELS]
+    return [{"id": lv["id"], "mid": lv["mid"], "name": lv["name"], "time": lv["time"], "min": lv["min"], "par": lv["par"], "set": lv["set"],
+             "group": lv["group"], "players": lv["players"], "fixed": lv["fixed"], "modality": lv["modality"], "family": lv["family"], "variant_of": lv["variant_of"]} for lv in LEVELS]
+
+
+def sequences():
+    return {str(n): {"id": e["id"], "ver": e["ver"], "mids": e["mids"], "maps": e["maps"]} for n, e in EXPEDITIONS.items()}

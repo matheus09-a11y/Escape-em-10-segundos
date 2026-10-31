@@ -91,6 +91,13 @@ def solution(n, sim, sf=None):
         return [S(0, [(100, 100), g(lambda: sim.latched[1]), (190, 85), (290, 200), g(lambda: sim.pressed[2]), (390, 250), (490, 130), g(lambda: sim.gate_open[5]), (590, 85), (690, 130), (740, 300)]),
                 S(1, [(180, 250), (290, 250), g(lambda: sim.latched[3]), (330, 415), (400, 415), (490, 400), g(lambda: sim.latched[5]), (590, 85), (740, 300)]),
                 S(2, [(150, 90), g(lambda: sim.gate_open[1]), (190, 85), (290, 85), (290, 410), g(lambda: sim.latched[3]), (330, 415), (400, 415), (500, 250), g(lambda: sim.gate_open[4]), (590, 250), (690, 400), (740, 300)])]
+    if n == 18:     # Primeiros passos (dupla)
+        return [S(0, [(200, 250), (450, 250), (730, 250)]), S(1, [(200, 250), (450, 250), (730, 250)])]
+    if n == 19:     # Cada um no seu caminho (dupla): 🔥 pelo corredor de espinhos, 💧 pelo do laser
+        return [S(0, [(600, 100), (650, 110), (740, 420)]), S(1, [(600, 250), (740, 420)])]
+    if n == 20:     # Segure a porta (dupla)
+        return [S(0, [(100, 120), g(lambda: sim.latched[1]), (150, 420), (300, 420), g(lambda: sim.has_key), (740, 250)]),
+                S(1, [(150, 250), g(lambda: sim.gate_open[0]), (300, 250), (480, 70), (620, 420), (740, 250)])]
     if n == 17:     # T6 Fuga em trio
         return [S(0, [(540, 90), g(lambda: sim.latched[2]), (610, 250), (740, 250)]),
                 S(1, [(540, 250), g(lambda: sim.latched[2]), (610, 250), (740, 250)]),
@@ -155,10 +162,10 @@ def near(cells, st, x, y, tol=14):
     return any(abs(cx - x) <= tol and abs(cy - y) <= tol for cx, cy in cells)
 
 print("Estrutura e alcance (portas abertas)")
-for n in range(6, 18):
+for n in range(6, 21):
     lv = LEVELS[n - 1]; k = lv["players"]
-    tag = f"[{lv['set']} {n}: {lv['name']}]"
-    check(f"{tag} exige exatamente {k} jogadores, papéis fixos {lv['roles']}", lv["players"] == k and len(lv["starts"]) == k and lv["fixed"] and lv["min"] == k)
+    tag = f"[{lv['mid']} {n}: {lv['name']}]"
+    check(f"{tag} exige exatamente {k} jogadores, papéis fixos {lv['roles']}", lv["players"] == k and len(lv["starts"]) == k and lv["fixed"])
     ok = all(not any(circle_rect(p[0], p[1], PLAYER_R, w) for w in lv["walls"]) for p in lv["starts"])
     check(f"{tag} largadas livres de parede", ok)
     inw = lambda x, y: any(circle_rect(x, y, PLAYER_R, w) for w in lv["walls"]) or any(circle_rect(x, y, PLAYER_R, g["r"]) for g in lv["gates"])
@@ -174,16 +181,16 @@ for n in range(6, 18):
 
 print("Robôs vencem com o limite padrão de 25 s")
 TIMES = {}
-for n in range(6, 18):
-    lv = LEVELS[n - 1]; tag = f"[{lv['set']} {n}: {lv['name']}]"
+for n in range(6, 21):
+    lv = LEVELS[n - 1]; tag = f"[{lv['mid']} {n}: {lv['name']}]"
     sim = play(n, lambda s: solution(n, s))
     won = sim.phase == "won" and sim.attempt == 1
     TIMES[n] = sim.t
     check(f"{tag} vitória na 1ª tentativa em {sim.t:.1f} s (limite 25 s)", won and sim.t <= 12, f"{sim.phase} t={sim.t:.1f} {sim.result}")
 
 print("Perturbação de tempo: 25 execuções por fase (atrasos e velocidades diferentes)")
-for n in range(6, 18):
-    lv = LEVELS[n - 1]; tag = f"[{lv['set']} {n}: {lv['name']}]"
+for n in range(6, 21):
+    lv = LEVELS[n - 1]; tag = f"[{lv['mid']} {n}: {lv['name']}]"
     rng = random.Random(1000 + n); worst = 0; bad = []
     for trial in range(25):
         k = lv["players"]

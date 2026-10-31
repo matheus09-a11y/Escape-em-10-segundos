@@ -199,8 +199,9 @@
         setBusy(false); banner(m.back ? "Você voltou para a sala!" : "", "good", 2500);
         if (!C.room || C.view === "connect") showView("lobby");
         break;
-      case "room": C.room = m; renderLobby(); updateChips(); updatePaused(); break;
+      case "room": C.room = m; renderLobby(); updateChips(); updatePaused(); if (C.resultMsg) renderResult(); break;
       case "level":
+        hideResult(); C.expInfo = m.exp || null;
         C.level = m.level; C.total = m.total; C.roles = m.roles; C.snap = null; C.pr = null; C.hist = []; C.outbox = []; C.ring = []; C.lastI = 0; C.result = null; C.att = 0; C.shown = [null, null, null]; C.pose = [null, null, null]; C.wonAt = 0; C.emos = []; C.marks = []; C.armed = -1; C.lastCount = -1;
         buildChips(); showView("game"); sfx("blip");
         // a fase está pronta neste navegador: avisa o servidor (a contagem só começa quando TODOS avisarem)
@@ -208,9 +209,12 @@
           requestAnimationFrame(() => requestAnimationFrame(ok)); setTimeout(ok, 600); }   // se a aba estiver em segundo plano o rAF não roda: o aviso sai mesmo assim
         break;
       case "s": onSnap(m); break;
+      case "notice": banner(m.msg, "info", 9000); break;
+      case "ckpt": try { saveCkpt(m); } catch (e) {} break;
+      case "result": C.resultMsg = m; C.contSent = null; renderResult(); sfx("win"); break;
       case "ev": if (m.i != null) { if (m.i <= C.lastI) { D.dup++; break; } C.lastI = m.i; } if (m.a != null && m.a < C.att) { D.stale++; break; } if (m.a > C.att) C.att = m.a; onEvent(m.e); break;   // evento atrasado de tentativa anterior é descartado
       case "mark": C.marks.push({ s: m.s, k: m.k, x: m.x, y: m.y, until: performance.now() + 5000 }); sfx("blip"); break;
-      case "stopped": C.level = null; C.snap = null; C.result = null; C.marks = []; C.armed = -1; if (C.view === "game") showView("lobby"); renderLobby(); banner(m.why || "", m.why && m.why.includes("zeraram") ? "good" : "bad", 9000); break;
+      case "stopped": hideResult(); C.expInfo = null; C.level = null; C.snap = null; C.result = null; C.marks = []; C.armed = -1; if (C.view === "game") showView("lobby"); renderLobby(); banner(m.why || "", m.why && m.why.includes("zeraram") ? "good" : "bad", 9000); break;
       case "emo": C.emos.push({ s: m.s, k: m.k, until: performance.now() + 2500 }); sfx("blip"); break;
       case "pong": C.rtt = Date.now() - m.ts; D.rtts.push(C.rtt); if (D.rtts.length > 12) D.rtts.shift(); $("co-ping").textContent = C.rtt + " ms"; break;
       case "err":
@@ -360,11 +364,28 @@
     if (!infos.length) return { name: "?", icon: "●", color: "#aaa" };
     return { name: infos.map((x) => x.name).join(" + "), icon: infos.map((x) => x.icon).join(""), color: infos[0].color };
   }
-  const SETS = [["classic", "Clássicas"], ["duo", "Dupla — exatamente 2 jogadores"], ["trio", "Trio — exatamente 3 jogadores"]];
-  const SET_TAG = { classic: "", duo: "Dupla · ", trio: "Trio · " };
-  function levelOk(l, size) { return l.set === "classic" || !l.set ? (l.min || 1) <= size : l.players === size; }
-  function levelNeed(l) { return !l.set || l.set === "classic" ? ((l.min || 1) > 1 ? `${l.min}+ jogadores` : "1 a 3 jogadores") : `exatamente ${l.players} jogadores`; }
-  function isFixed(l) { return !!l && l.set && l.set !== "classic"; }
+  const SET_TAG = {};   // (sem rótulos de conjunto: a modalidade já aparece no lobby)
+  const MOD = { 2: "Dupla — 2 jogadores", 3: "Trio — 3 jogadores" };
+  const LS_CKPT = "dez-segundos-online-checkpoint-v1";
+  function lvl(i) { return i == null ? null : C.hi && C.hi.levels[i]; }
+  function isFixed(l) { return !!(l && l.fixed); }
+  /** Mapa que começaria agora: fase pendente da expedição ou o mapa avulso escolhido. */
+  function targetOf(r) { return r.mode === "exp" ? (r.exp && r.exp.step < r.exp.total ? r.exp.maps[r.exp.step] : null) : r.level; }
+  /** Checkpoint guardado neste navegador (só vale se for da modalidade, do tempo e da sequência atuais). */
+  function localCkpt(size, limit) {
+    let all = {}; try { all = JSON.parse(lsGet(LS_CKPT) || "{}"); } catch (e) { all = {}; }
+    const ck = all[String(size)], sq = C.hi && C.hi.seqs && C.hi.seqs[String(size)];
+    if (!ck || !sq) return { ck: null, why: "" };
+    if (ck.v !== 1 || !ck.seq || ck.seq.id !== sq.id) return { ck: null, why: "Há um checkpoint antigo ou de outra expedição salvo aqui; ele não pode ser usado." };
+    if (ck.seq.ver !== sq.ver) return { ck: null, why: "Há um checkpoint de uma versão antiga da expedição; ele não vale mais." };
+    if (ck.limit !== limit) return { ck, why: `Há um checkpoint salvo com ${ck.limit} s por fase (fase ${ck.next + 1} de 6). Para continuar, o tempo da sala precisa ser ${ck.limit} s.`, blocked: true };
+    return { ck, why: "" };
+  }
+  function saveCkpt(m) {
+    let all = {}; try { all = JSON.parse(lsGet(LS_CKPT) || "{}"); } catch (e) { all = {}; }
+    if (m.done || !m.c) { const old = all[String(m.mod)]; if (old && old.limit === m.limit) delete all[String(m.mod)]; } else all[String(m.mod)] = m.c;
+    lsSet(LS_CKPT, JSON.stringify(all));
+  }
   function nP() { return C.roles && C.roles.length ? C.roles.length : 3; }
   function onEvent(e) {
     const k = e[0];
@@ -391,22 +412,25 @@
     $("co-code-big").textContent = r.code;
     const size = r.size || 3, mineRoles = (r.players[C.you] && r.players[C.you].roles) || [];
     const sizeEl = $("co-size"); sizeEl.textContent = "";
-    for (let n = 1; n <= 3; n++) {
+    const three = !!(r.players[2]);                                   // 3 participantes (inclusive quem caiu): não dá para virar Dupla
+    [2, 3].forEach((n) => {
       const b = document.createElement("button");
       b.type = "button"; b.setAttribute("role", "radio"); b.setAttribute("aria-checked", String(n === size));
-      b.textContent = n === 1 ? "1 jogador" : n + " jogadores";
-      b.disabled = !isHost() || r.phase !== "lobby";
+      b.textContent = MOD[n];
+      b.disabled = !isHost() || r.phase !== "lobby" || (n === 2 && three);
       b.addEventListener("click", () => send({ t: "size", n }));
       sizeEl.appendChild(b);
-    }
-    $("co-size-note").textContent = isHost() ? (size < 3 ? "Cada jogador escolhe 1 poder. Com menos de 3, sobra poder sem dono: nas fases com perigo, fiquem no corredor do seu poder." : "") : "Só o anfitrião escolhe quantos jogam.";
+    });
+    $("co-size-note").textContent = !isHost() ? "Só o anfitrião escolhe a modalidade." : (three && size === 3 ? "Para virar Dupla, um dos 3 participantes precisa sair antes (a sala nunca expulsa ninguém sozinha)." : "A modalidade define a capacidade da sala e os mapas disponíveis.");
+    const present = r.players.slice(0, size).filter(Boolean).length;
+    $("co-vagas").textContent = `${MOD[size]} · participantes: ${present} de ${size}` + (present < size ? ` · ${size - present} vaga${size - present > 1 ? "s" : ""} livre${size - present > 1 ? "s" : ""}` : " · sala completa");
     const list = $("co-slots"); list.textContent = "";
     r.players.slice(0, size).forEach((p, i) => {
       const li = document.createElement("li");
       li.className = "co-slot" + (p ? "" : " empty") + (p && !p.on ? " off" : "") + (p && p.ready ? " ready" : "");
       if (!p) { li.textContent = "Aguardando jogador…"; }
       else {
-        const infos = (isFixed(C.hi && C.hi.levels[r.level]) ? [C.hi.roles[Object.keys(C.hi.roles)[i]]] : (p.roles || []).map((id) => C.hi && C.hi.roles[id])).filter(Boolean);
+        const infos = (isFixed(lvl(targetOf(r))) ? [C.hi.roles[Object.keys(C.hi.roles)[i]]] : (p.roles || []).map((id) => C.hi && C.hi.roles[id])).filter(Boolean);
         const b = document.createElement("b"); b.textContent = p.name + (i === C.you ? " (você)" : "");
         const s = document.createElement("span");
         s.textContent = [i === r.host ? "👑 anfitrião" : "", infos.length ? infos.map((x) => `${x.icon} ${x.name}`).join(" + ") : "sem papel", p.on ? (p.ready ? "✔ pronto" : "aguardando ficar pronto") : "⚠ desconectado"].filter(Boolean).join(" · ");
@@ -415,10 +439,10 @@
       list.appendChild(li);
     });
     const rolesEl = $("co-roles"); rolesEl.textContent = "";
-    const lvNow = C.hi && C.hi.levels[r.level], fixedNow = isFixed(lvNow);
+    const lvNow = lvl(targetOf(r)), fixedNow = isFixed(lvNow);
     const rid = C.hi ? Object.keys(C.hi.roles) : [];
     $("co-roles-note").textContent = fixedNow
-      ? "Nesta fase os poderes são fixos, por ordem de entrada: " + r.players.slice(0, size).map((p, i) => `${p ? p.name : "jogador " + (i + 1)} ${C.hi.roles[rid[i]].icon} ${C.hi.roles[rid[i]].name}`).join(" · ") + "."
+      ? "Neste mapa os poderes são fixos, por ordem de entrada: " + r.players.slice(0, size).map((p, i) => `${p ? p.name : "jogador " + (i + 1)} ${C.hi.roles[rid[i]].icon} ${C.hi.roles[rid[i]].name}`).join(" · ") + "."
       : "Cada jogador escolhe 1 poder (toque de novo para soltar).";
     for (const id of (fixedNow ? [] : Object.keys(C.hi ? C.hi.roles : {}))) {
       const info = C.hi.roles[id], have = mineRoles.includes(id);
@@ -434,38 +458,101 @@
       b.addEventListener("click", () => send({ t: "role", role: id }));
       rolesEl.appendChild(b);
     }
-    const sel = $("co-level");
+    // ---- o que jogar: Expedição ou mapa avulso (a lista vem do servidor e SÓ tem mapas da modalidade escolhida)
+    const modeEl = $("co-mode"); modeEl.textContent = "";
+    [["exp", "Expedição (6 fases)"], ["free", "Mapa avulso"]].forEach(([k, label]) => {
+      const b = document.createElement("button"); b.type = "button"; b.setAttribute("role", "radio"); b.setAttribute("aria-checked", String(r.mode === k));
+      b.textContent = label; b.disabled = !isHost() || r.phase !== "lobby"; b.addEventListener("click", () => send({ t: "mode", v: k })); modeEl.appendChild(b);
+    });
+    const sel = $("co-level"), freeEl = $("co-free"), expEl = $("co-exp");
+    freeEl.classList.toggle("hidden", r.mode === "exp"); expEl.classList.toggle("hidden", r.mode !== "exp");
+    sel.textContent = "";
     if (C.hi) {
-      sel.textContent = "";
-      SETS.forEach(([key, label]) => {
+      const ph = document.createElement("option"); ph.value = ""; ph.textContent = r.maps.length ? "— escolha um mapa —" : "(nenhum mapa para esta modalidade)"; sel.appendChild(ph);
+      [["classic", "Clássicos"], ["new", "Mapas novos"]].forEach(([g, label]) => {
+        const items = r.maps.filter((i) => (lvl(i).group || "classic") === g); if (!items.length) return;
         const grp = document.createElement("optgroup"); grp.label = label;
-        C.hi.levels.forEach((l, i) => {
-          if ((l.set || "classic") !== key) return;
-          const o = document.createElement("option"); o.value = i;
-          o.textContent = `${l.id}. ${l.name} · ${levelNeed(l)}`;
-          o.disabled = !levelOk(l, size); grp.appendChild(o);
-        });
+        items.forEach((i) => { const l = lvl(i), o = document.createElement("option"); o.value = i; o.textContent = `${l.id}. ${l.name}`; grp.appendChild(o); });
         sel.appendChild(grp);
       });
     }
-    sel.value = r.level; sel.disabled = !isHost();
-    const curL = C.hi && C.hi.levels[r.level];
-    $("co-level-note").textContent = (curL ? `Esta fase é para ${levelNeed(curL)}. ` : "") + (isHost() ? "" : "Só o anfitrião escolhe a fase.");
+    sel.value = r.level == null ? "" : String(r.level); sel.disabled = !isHost() || !r.maps.length;
+    const curL = lvl(r.mode === "free" ? r.level : null);
+    $("co-level-note").textContent = !r.maps.length ? `Não há mapas compatíveis com ${MOD[size]}.` : (r.mode === "free" ? (curL ? `Este mapa é para exatamente ${size} jogadores (${MOD[size]}). ` : "Escolha um mapa da lista. ") : "") + (isHost() ? "" : "Só o anfitrião escolhe o que jogar.");
+    if (r.mode === "exp" && r.exp) renderExp(r, expEl);
     renderLimit(r);
     const seated = r.players.slice(0, size);
     const meP = r.players[C.you], myReady = !!(meP && meP.ready);
     const rb = $("co-ready"); rb.textContent = myReady ? "↩ Cancelar pronto" : "✔ Estou pronto"; rb.setAttribute("aria-pressed", String(myReady)); rb.disabled = r.phase !== "lobby";
     let why = "";
     const missing = seated.filter((p) => !p).length;
-    if (missing) why = `Faltam ${missing} jogador${missing > 1 ? "es" : ""}. Mande o código ${r.code}.`;
+    if (missing) why = `${MOD[size]}: faltam ${missing} jogador${missing > 1 ? "es" : ""} (a partida exige exatamente ${size}). Mande o código ${r.code}.`;
     else if (seated.some((p) => !p.on)) why = "Um jogador está desconectado.";
-    else if (curL && !levelOk(curL, size)) why = isFixed(curL) ? `Essa fase é só para exatamente ${curL.players} jogadores (esta sala tem ${size}). Escolha outra fase ou mude a quantidade.` : `Essa fase precisa de ${curL.min} jogadores.`;
-    else if (!isFixed(curL) && seated.some((p) => (p.roles || []).length !== 1)) why = "Cada jogador precisa escolher 1 poder (🔥 💧 🌿).";
+    else if (targetOf(r) == null) why = r.mode === "exp" ? "Essa expedição já terminou: recomece do início." : "Escolha um mapa ou a Expedição.";
+    else if (!isFixed(lvl(targetOf(r))) && seated.some((p) => (p.roles || []).length !== 1)) why = "Cada jogador precisa escolher 1 poder (🔥 💧 🌿).";
     else if (seated.some((p) => !p.ready)) why = `Aguardando ficar pronto: ${seated.filter((p) => !p.ready).map((p) => p.name).join(", ")}.`;
     const start = $("co-start");
     start.classList.toggle("hidden", !isHost());
     start.disabled = !!why;
+    start.textContent = r.mode === "exp" && r.exp ? `Começar expedição (fase ${Math.min(r.exp.step + 1, 6)} de 6) ▶` : "Começar ▶";
     $("co-start-note").textContent = isHost() ? (why || "Tudo pronto!") : "Aguardando o anfitrião começar.";
+  }
+
+  /** Painel da EXPEDIÇÃO no lobby: as 6 fases (só da modalidade), progresso e como continuar. O checkpoint fica no navegador do anfitrião. */
+  function renderExp(r, el) {
+    const e = r.exp, host = isHost(); el.textContent = "";
+    const h = document.createElement("h2"); h.textContent = `Expedição — ${MOD[r.size]}`; el.appendChild(h);
+    const ol = document.createElement("ol");
+    e.maps.forEach((mi, i) => { const li = document.createElement("li"); li.className = i < e.step ? "done" : i === e.step ? "cur" : ""; const l = lvl(mi);
+      const per = e.stats.per[i]; li.textContent = `${i < e.step ? "✔ " : i === e.step ? "▶ " : ""}${l ? l.name : "?"}` + (per ? ` — ${per.time.toFixed(1)} s, ${per.defeats} derrota${per.defeats === 1 ? "" : "s"}` : ""); ol.appendChild(li); });
+    el.appendChild(ol);
+    const p1 = document.createElement("p"); p1.className = "small";
+    p1.textContent = e.step >= e.total ? "Expedição concluída." : `Fase ${e.step + 1} de ${e.total}${e.progress ? ` · ${e.stats.defeats} derrota${e.stats.defeats === 1 ? "" : "s"} · tempo ativo ${e.stats.active.toFixed(1)} s` : ""}. Tempo por fase: ${r.limit} s (mesmo para todas).` + (e.restored ? " Retomada de um checkpoint." : "");
+    el.appendChild(p1);
+    const row = document.createElement("div"); row.className = "row";
+    const mem = e.progress && e.step < e.total;
+    if (mem) { const note = document.createElement("p"); note.className = "small"; note.textContent = "Progresso guardado nesta sala (dura enquanto a sala existir). A fase pendente recomeça do início; ninguém precisa ter jogado as anteriores: o progresso é da expedição, não de cada pessoa."; el.appendChild(note); }
+    const lc = localCkpt(r.size, r.limit);
+    if (host && lc.ck && !lc.blocked && !(mem && e.step === lc.ck.next)) {
+      const b = document.createElement("button"); b.type = "button"; b.className = "btn btn-ghost"; b.disabled = r.phase !== "lobby";
+      b.textContent = `▶ Continuar do checkpoint (fase ${lc.ck.next + 1} de 6 · ${lc.ck.stats.defeats} derrota${lc.ck.stats.defeats === 1 ? "" : "s"} · ${lc.ck.stats.active.toFixed(1)} s)`;
+      b.addEventListener("click", () => send({ t: "exp", a: "continue", ck: lc.ck })); row.appendChild(b);
+    }
+    if (host && (mem || e.step >= e.total)) {
+      const b = document.createElement("button"); b.type = "button"; b.className = "btn btn-ghost"; b.disabled = r.phase !== "lobby"; b.textContent = "↺ Recomeçar do início";
+      b.addEventListener("click", () => { if (!e.progress || confirm("Recomeçar a expedição do início? O progresso desta sala será descartado.")) send({ t: "exp", a: "restart" }); }); row.appendChild(b);
+    }
+    el.appendChild(row);
+    const w = document.createElement("p"); w.className = "small";
+    w.textContent = lc.why || (host ? "O checkpoint é salvo só neste navegador (o do anfitrião), a cada fase concluída. Se outra pessoa for anfitriã ou você trocar de navegador, ele não acompanha." : "Só o anfitrião guarda o checkpoint, no navegador dele.");
+    el.appendChild(w);
+  }
+
+  /** Tela de resultado entre as fases da expedição e no final. Cada jogador confirma "Pronto para continuar". */
+  function renderResult() {
+    const m = C.resultMsg, box = $("co-result");
+    if (!m) { box.classList.add("hidden"); return; }
+    box.textContent = "";
+    const p = document.createElement("div"); p.className = "panel good";
+    const h = document.createElement("h1"); h.textContent = m.final ? "Expedição concluída! 🏆" : `Fase ${m.step} de ${m.total} concluída! 🎉`; p.appendChild(h);
+    const st = document.createElement("div"); st.className = "co-stats";
+    const lines = m.final
+      ? [`Fases concluídas: ${m.stats.done} de ${m.total}`, `Tempo ativo total: ${m.stats.active.toFixed(1)} s`, `Derrotas totais: ${m.stats.defeats}`, `${m.modality} · ${m.limit} s por fase`].concat(m.stats.per.map((x, i) => `${i + 1}. ${(lvl(C.room && C.room.exp ? C.room.exp.maps[i] : null) || {}).name || x.mid}: ${x.time.toFixed(1)} s, ${x.defeats} derrota${x.defeats === 1 ? "" : "s"}`))
+      : [`Tempo desta fase: ${m.time.toFixed(1)} s de ${m.limit} s`, `Derrotas nesta fase: ${m.defeats}`, `Progresso da expedição: ${m.step} de ${m.total}`, `Total até aqui: ${m.stats.active.toFixed(1)} s ativos · ${m.stats.defeats} derrota${m.stats.defeats === 1 ? "" : "s"}`, `Próxima: ${m.next}`];
+    st.textContent = lines.join("\n"); st.style.whiteSpace = "pre-line"; p.appendChild(st);
+    const acts = document.createElement("div"); acts.className = "ov-actions";
+    if (!m.final) {
+      const conf = (C.room && C.room.transit && C.room.transit.rid === m.rid) ? C.room.transit.c : [];
+      const mine = conf.includes(C.you) || C.contSent === m.rid;
+      const who = document.createElement("div"); who.className = "co-who";
+      who.textContent = "Confirmaram: " + (C.room ? C.room.players.slice(0, C.room.size).map((q, i) => `${q ? q.name : "—"}${conf.includes(i) ? " ✔" : " …"}`).join(" · ") : ""); p.appendChild(who);
+      const b = btn(mine ? "Aguardando os outros…" : "Pronto para continuar ▶", "btn", () => { if (C.contSent === m.rid) return; C.contSent = m.rid; send({ t: "cont", rid: m.rid }); renderResult(); });
+      b.disabled = mine; acts.appendChild(b);
+    } else if (isHost()) {
+      acts.append(btn("Repetir expedição", "btn", () => send({ t: "exp", a: "repeat" })), btn("Voltar ao lobby", "btn btn-ghost", () => send({ t: "lobby" })));
+    } else { const w = document.createElement("p"); w.textContent = "Aguardando o anfitrião: repetir a expedição ou voltar ao lobby."; acts.appendChild(w); }
+    p.appendChild(acts); box.appendChild(p); box.classList.remove("hidden");
+    const f = box.querySelector("button:not(:disabled)"); if (f) f.focus({ preventScroll: true });
   }
 
   /** Tempo por fase: todos veem; só o anfitrião muda (e só no lobby). Mudar o tempo desfaz o "pronto" de todos. */
@@ -480,8 +567,8 @@
     num.disabled = setb.disabled = !host || r.phase !== "lobby";
     if (document.activeElement !== num) num.value = PRESETS.includes(lim) ? "" : lim;
     num.placeholder = String(lim);
-    const lv = C.hi && C.hi.levels[r.level], par = lv && lv.par ? lv.par : 0;
-    const hard = C.hi ? C.hi.levels.filter((l) => l.par && lim < l.par).map((l) => l.id) : [];
+    const lv = lvl(targetOf(r)), par = lv && lv.par ? lv.par : 0;
+    const hard = C.hi ? r.maps.map(lvl).filter((l) => l && l.par && lim < l.par).map((l) => l.id) : [];
     let note = `Tempo da tentativa: ${lim} s para todos${host ? "" : " (só o anfitrião muda)"}. A velocidade de inimigos e mecanismos não muda com o tempo.`;
     if (par && lim < par) note += ` ⚠ Com ${lim} s esta fase é impossível: nem o caminho perfeito cabe (cerca de ${par} s).`;
     else if (par && lim < par * 3) note += ` ⚠ Tempo apertado para esta fase: o caminho perfeito leva cerca de ${par} s.`;
@@ -505,7 +592,7 @@
       d.style.setProperty("--rc", roleOf(i).color);
       box.appendChild(d);
     }
-    $("co-lvname").textContent = C.level ? `${SET_TAG[C.level.set] || ""}Fase ${C.level.id}: ${C.level.name}` : "";
+    $("co-lvname").textContent = C.level ? (C.expInfo ? `Expedição · Fase ${C.expInfo.step} de ${C.expInfo.total} · ${C.level.name}` : `Fase ${C.level.id}: ${C.level.name}`) : "";
     $("co-hint").textContent = C.level ? C.level.hint : "";
     updateChips();
   }
@@ -530,7 +617,7 @@
     else if (C.pausedBy >= 0) banner("Todos voltaram!", "good", 2000);
     C.pausedBy = off;
   }
-  function hideResult() { $("co-result").classList.add("hidden"); }
+  function hideResult() { C.resultMsg = null; $("co-result").classList.add("hidden"); }
   function btn(label, cls, fn) { const b = document.createElement("button"); b.type = "button"; b.className = cls; b.textContent = label; b.addEventListener("click", fn); return b; }
 
   /* ------------------------------------------------------------------ entrada */
@@ -887,7 +974,7 @@
   $("co-name").addEventListener("keydown", (e) => { if (e.key === "Enter") enter($("co-code").value ? "join" : "create"); });
   $("co-back").addEventListener("click", () => close(true));
   $("co-leave").addEventListener("click", () => close(true));
-  $("co-level").addEventListener("change", (e) => send({ t: "level", n: +e.target.value }));
+  $("co-level").addEventListener("change", (e) => { const l = e.target.value === "" ? null : lvl(+e.target.value); if (l) send({ t: "level", mid: l.mid }); });
   $("co-start").addEventListener("click", () => send({ t: "start" }));
   $("co-copy").addEventListener("click", async () => {
     const url = (C.same ? location.origin + location.pathname : "") + (C.same ? "?sala=" + C.code : "");

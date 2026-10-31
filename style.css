@@ -446,3 +446,10 @@ body:not(.touch) #co-bottom { justify-content: center; } body:not(.touch) .co-ac
 #co-diag { position: absolute; left: 6px; bottom: 6px; z-index: 5; margin: 0; padding: 6px 8px; font: 11px/1.35 ui-monospace, Menlo, Consolas, monospace; color: #b9ffd8; background: rgba(7, 6, 15, .82); border: 1px solid #39ff88; border-radius: 8px; pointer-events: none; max-width: calc(100% - 12px); white-space: pre-wrap; }
 #co-diag.hidden { display: none; }
 #co-load { white-space: pre-line; font-size: 16px; }
+
+.co-exp { background: #12102a; border: 2px solid #3a3680; border-radius: 12px; padding: 10px 12px; margin: 6px 0; font-size: 13px; }
+.co-exp h2 { margin: 0 0 6px; font-size: 14px; color: var(--cyan); } .co-exp ol { margin: 4px 0 8px; padding-left: 22px; } .co-exp li { margin: 2px 0; } .co-exp li.done { color: var(--green); } .co-exp li.cur { color: var(--gold); font-weight: 700; }
+.co-exp .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; } .co-exp .row .btn { min-height: 40px; font-size: 13px; padding: 6px 10px; }
+.co-exp .small { color: var(--dim); font-size: 12px; margin: 4px 0; }
+#co-result .panel h1 { font-size: 22px; } #co-result .co-stats { text-align: left; font-size: 14px; margin: 6px 0; line-height: 1.5; } #co-result .co-who { font-size: 13px; color: var(--dim); margin: 6px 0; }
+#co-result .panel { max-height: 100%; overflow-y: auto; }
