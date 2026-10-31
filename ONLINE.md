@@ -114,3 +114,14 @@ Não há contas nem moderação: quem tem o código entra na sala (3 vagas).
   mesma modalidade, capítulo, dificuldade e tempo; validação completa no servidor. Guardado no navegador do anfitrião.
 - **Recordes e conclusões** (navegador, `dez-segundos-online-recordes-v1`): separados por modalidade + dificuldade + tempo por tentativa; a tela de
   resultado mostra a configuração e compara só com a mesma configuração. Não existia progresso cooperativo antigo; o progresso da campanha não é tocado.
+
+## Sincronização do cenário (drones e demais elementos)
+Cada partida (`gid`) manda a TODOS a mesma mensagem de fase: mapa, versão do mapa (`mver`), variante de dificuldade e a contagem de entidades (`ent`: paredes, placas, portas, espinhos, lasers, serras, drones, portais). O navegador confere o que montou e responde `loaded`; o servidor só começa a contagem quando todos confirmaram a MESMA partida e as MESMAS entidades (senão reenvia o estado completo; se persistir, não começa). A cada ~1 s o quadro traz a contagem de entidades (se um navegador divergir, ele pede `resync`, sem duplicar nada). Mensagens de outra partida/tentativa são descartadas. Páginas antigas (versão `BUILD` diferente) aparecem como "desatualizadas" no lobby e bloqueiam o início. O painel de diagnóstico (F3) mostra mapa/versão, partida, tentativa, regra, contagem de entidades e quantas foram desenhadas, e uma impressão digital comparável entre jogadores. Teste: `python3 test_sync.py`.
+
+## Regra: Clássico × Resgate
+Escolhida pelo anfitrião no lobby (padrão **Clássico**). Fica fixa durante a tentativa e a expedição; mudar a regra recomeça a expedição.
+- **Clássico**: igual a sempre — quem for atingido encerra a tentativa para todos.
+- **Resgate**: quem for atingido **fica caído** (parado, translúcido, 🆘) e a tentativa continua. Um amigo ativo (ou protegido) chega a até ~70 px, **fica parado** e segura **E** (ou o botão **🛟 Resgatar**, no toque) por **1,5 s**; a barra sobre o caído mostra o progresso. Mover-se, soltar a ação, sair do alcance, ser derrubado ou o caído sair/ser resgatado por outro cancela e zera. Só um resgatador conta por vez (dois não somam). Quem volta fica **protegido por 1,5 s** (anel ciano).
+- Sem vitória enquanto alguém estiver caído; todos caídos = tentativa perdida; o tempo acabando durante um resgate encerra normalmente. Quem cai fica numa posição segura (nunca em espinhos/laser/serra e nunca atravessando paredes ou portas fechadas; sem posição segura = derrota da tentativa). Quem **desconecta** não vira caído (vale a regra normal de reconexão).
+- Recordes, resultados e checkpoints são **separados por regra**; os antigos (sem regra) valem como Clássico. Layout, dificuldade e tempo não mudam.
+- Testes: `python3 test_resgate.py` (simulação) e `python3 test_resgate_ws.py` (3 clientes reais).

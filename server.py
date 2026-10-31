@@ -40,6 +40,7 @@ RATE_PER_SEC = 60.0          # mensagens por segundo por conexão (rajada de 2x)
 IDLE_TIMEOUT = 45.0          # sem NADA recebido (o cliente manda ping a cada 10 s)
 GRACE_LOBBY = 15.0
 GRACE_PLAY = 30.0
+RS_STALE = 0.8                 # a ação de resgatar vale 0,8 s sem renovação
 INPUT_STALE = 0.8            # entrada de direção sem renovar por tanto tempo vira "parado"
 TICK = 1 / 60
 _D = 0.7071067811865476
@@ -47,7 +48,7 @@ DIRS = [(0.0, 0.0), (1.0, 0.0), (_D, _D), (0.0, 1.0), (-_D, _D), (-1.0, 0.0), (-
 CMD_QUEUE_MAX = 8            # comandos de movimento aguardando (cada um vale 1/60 s); passar disso descarta os mais antigos
 DEFAULT_LIMIT = 25           # segundos por tentativa (o anfitrião muda no lobby: 5 a 300)
 LIMIT_MIN, LIMIT_MAX = 5, 300
-BUILD = "2026-11-01-r1"       # versão do cliente/servidor: mudou aqui => mudou em coop.js (BUILD). Clientes com página antiga são avisados.
+BUILD = "2026-11-02-r1"       # versão do cliente/servidor: mudou aqui => mudou em coop.js (BUILD). Clientes com página antiga são avisados.
 REQUIRE_BUILD = os.environ.get("REQUIRE_BUILD", "1") == "1"    # os testes automáticos desligam (os robôs não têm "página")
 SIZES = (2, 3)               # modalidades: Dupla (2) e Trio (3)
 MODALITY = {2: "Dupla — 2 jogadores", 3: "Trio — 3 jogadores"}
@@ -219,6 +220,8 @@ class Slot:
         self.dropped = None          # instante da queda (None = conectado)
         self.inp = (0.0, 0.0)
         self.inp_t = 0.0
+        self.rs = False             # mantendo a ação de resgatar
+        self.rs_t = 0.0
         self.mode = "legacy"         # "cmd" depois do primeiro comando numerado (mv)
         self.cmdq = collections.deque(maxlen=CMD_QUEUE_MAX)
         self.expect = None           # próximo número de sequência esperado
@@ -228,8 +231,8 @@ class Slot:
 class Exp:
     """Progresso de uma EXPEDIÇÃO (6 fases da modalidade, em ordem). Fixa modalidade, capítulo, dificuldade e tempo durante a sequência.
     Só muda nas transições (derrota, vitória, reinício): nunca por quadro."""
-    def __init__(self, n, limit, chap=1, diff="normal"):
-        self.n, self.limit, self.chap, self.diff = n, limit, chap, diff
+    def __init__(self, n, limit, chap=1, diff="normal", rule="classic"):
+        self.n, self.limit, self.chap, self.diff, self.rule = n, limit, chap, diff, rule
         self.seq = EXPEDITIONS[(n, chap)]
         self.maps = exp_maps(n, chap, diff)       # None = esse capítulo não existe nessa dificuldade
         self.step = 0               # fase atual/pendente (0..5); 6 = concluída
@@ -252,20 +255,24 @@ class Exp:
         return {"active": round(self.active, 2), "defeats": self.defeats, "done": self.step, "per": [dict(x) for x in self.per]}
 
     def pub(self):
-        return {"id": self.seq["id"], "ver": self.seq["ver"], "chapter": self.chap, "title": self.seq["title"], "diff": self.diff, "available": self.maps is not None,
+        return {"id": self.seq["id"], "ver": self.seq["ver"], "chapter": self.chap, "title": self.seq["title"], "diff": self.diff, "rule": self.rule, "available": self.maps is not None,
                 "step": self.step, "total": EXP_STEPS, "mids": [LEVELS[i]["mid"] for i in self.maps] if self.maps else [], "maps": self.maps or [],
                 "stats": self.stats(), "restored": self.restored, "progress": self.has_progress()}
 
     def checkpoint(self):
-        return {"v": 2, "seq": {"id": self.seq["id"], "ver": self.seq["ver"]}, "mod": self.n, "diff": self.diff, "limit": self.limit, "next": self.step,
+        return {"v": 2, "seq": {"id": self.seq["id"], "ver": self.seq["ver"]}, "mod": self.n, "diff": self.diff, "rule": self.rule, "limit": self.limit, "next": self.step,
                 "stats": self.stats(), "saved": int(time.time())}
+
+
+RULES = ("classic", "rescue")
+RULE_NAMES = {"classic": "Clássico", "rescue": "Resgate"}
 
 
 def _num(x, lo, hi):
     return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) and lo <= x <= hi
 
 
-def validate_ckpt(ck, n, limit, diff="normal", chap=1):
+def validate_ckpt(ck, n, limit, diff="normal", chap=1, rule="classic"):
     """Valida um checkpoint ANTES de usá-lo. Devolve (Exp, None) ou (None, motivo).
     Versão 1 (anterior à dificuldade) é migrada com segurança: vale como NORMAL."""
     if not isinstance(ck, dict):
@@ -285,6 +292,11 @@ def validate_ckpt(ck, n, limit, diff="normal", chap=1):
         return None, f"Esse checkpoint é do {e['title']}. Escolha esse capítulo para continuar."
     if cdiff != diff:
         return None, f"Esse checkpoint é da dificuldade {DIFF_NAMES.get(cdiff, cdiff)} e a sala está em {DIFF_NAMES[diff]}. Ajuste a dificuldade para continuar."
+    crule = ck.get("rule", "classic")                                   # checkpoints antigos não tinham regra: eram Clássico
+    if crule not in RULES:
+        return None, "Checkpoint com regra desconhecida."
+    if crule != rule:
+        return None, f"Esse checkpoint é da regra {RULE_NAMES[crule]} e a sala está em {RULE_NAMES[rule]}. Ajuste a regra para continuar."
     if ck.get("limit") != limit:
         return None, f"Esse checkpoint é de uma expedição com {ck.get('limit')} s por fase e a sala está com {limit} s. Ajuste o tempo para continuar."
     nxt = ck.get("next")
@@ -304,7 +316,7 @@ def validate_ckpt(ck, n, limit, diff="normal", chap=1):
         tot_def += it["defeats"]; tot_time += it["time"]
     if not (isinstance(st.get("defeats"), int) and not isinstance(st.get("defeats"), bool)) or st["defeats"] != tot_def or not _num(st.get("active"), tot_time - 0.5, 100000):
         return None, "Checkpoint com totais que não batem."
-    x = Exp(n, limit, chap, diff)
+    x = Exp(n, limit, chap, diff, rule)
     x.step, x.per, x.defeats, x.active, x.restored = nxt, [{"mid": it["mid"], "time": float(it["time"]), "defeats": it["defeats"]} for it in st["per"]], tot_def, float(st["active"]), True
     return x, None
 
@@ -329,6 +341,7 @@ class Room:
         self.task = None
         self.paused = False
         self.won_at = None
+        self.rule = "classic"        # regra da sala: "classic" | "rescue" (só o anfitrião muda, só no lobby; fixa durante a tentativa/expedição)
         self.limit = DEFAULT_LIMIT   # tempo da tentativa, igual para todos (só o anfitrião muda, só no lobby)
         self.load_t0 = None
         self.evn = 0                 # contador de eventos da sala (o navegador descarta repetidos/antigos)
@@ -349,7 +362,7 @@ class Room:
 
     def state(self):
         return {
-            "t": "room", "code": self.code, "host": self.host, "size": self.size, "modality": MODALITY[self.size], "limit": self.limit, "level": self.level,
+            "t": "room", "code": self.code, "host": self.host, "size": self.size, "modality": MODALITY[self.size], "limit": self.limit, "level": self.level, "rule": self.rule, "rule_name": RULE_NAMES[self.rule],
             "build": BUILD, "mode": self.mode, "exp": self.exp.pub() if self.exp else None, "maps": maps_for(self.size, self.difficulty), "difficulty": self.difficulty, "diff_name": DIFF_NAMES[self.difficulty], "chapter": self.chapter,
             "transit": ({"rid": self.transit["rid"], "c": sorted(self.transit["confirmed"]), "final": self.transit["final"]} if self.transit else None),
             "phase": self.phase, "paused": self.paused,
@@ -434,7 +447,7 @@ class Room:
         if lv["fixed"]:                     # fases novas: papéis definidos pela fase, por ordem de vaga
             for i, x in enumerate(self.slots[:self.size]):
                 x.roles = [ROLE_IDS[i]]
-        self.sim = Sim(lv, [s.roles for s in self.slots[:self.size]], limit=self.limit, wait=True)
+        self.sim = Sim(lv, [s.roles for s in self.slots[:self.size]], limit=self.limit, wait=True, rescue=(self.rule == "rescue"))
         self.load_t0 = time.monotonic()
         for s in self.slots:
             if s:
@@ -444,6 +457,7 @@ class Room:
         for s in self.slots:
             if s:
                 s.inp, s.inp_t = (0.0, 0.0), 0.0
+                s.rs = False
         self.gid += 1; self.snapn = 0
         self.broadcast(self.level_msg())
         self.push_state()
@@ -456,9 +470,9 @@ class Room:
         cada tipo de entidade. Não depende de eventos anteriores: serve também para reenviar a quem perdeu algo (resync)."""
         lv = LEVELS[self.level]
         lv_pub = dict(public(lv), time=self.limit)    # o tempo mostrado é o da sala, não o da fase
-        return {"t": "level", "level": lv_pub, "n": self.level, "total": len(LEVELS), "roles": [s.roles for s in self.slots[:self.size]], "size": self.size, "limit": self.limit,
+        return {"t": "level", "level": lv_pub, "n": self.level, "total": len(LEVELS), "roles": [s.roles for s in self.slots[:self.size]], "size": self.size, "limit": self.limit, "rule": self.rule,
                 "exp": ({"step": self.exp.step + 1, "total": EXP_STEPS, "id": self.exp.seq["id"], "chapter": self.exp.chap, "title": self.exp.seq["title"], "diff": self.exp.diff} if self.mode == "exp" and self.exp else None),
-                "diff": lv["diff"], "difficulty": self.difficulty, "gid": self.gid, "build": BUILD, "mver": map_version(lv), "mid": lv["mid"], "ent": ent_counts(lv), "resync": resync}
+                "diff": lv["diff"], "difficulty": self.difficulty, "rule": self.rule, "gid": self.gid, "build": BUILD, "mver": map_version(lv), "mid": lv["mid"], "ent": ent_counts(lv), "resync": resync}
 
     def advance(self):
         """Mapa avulso: depois da vitória segue para o próximo mapa da MESMA modalidade (ou encerra). A expedição usa a tela de resultado."""
@@ -477,7 +491,7 @@ class Room:
         self.broadcast({"t": "notice", "msg": msg})
 
     def new_exp(self):
-        self.exp = Exp(self.size, self.limit, self.chapter, self.difficulty)
+        self.exp = Exp(self.size, self.limit, self.chapter, self.difficulty, self.rule)
 
     def begin_transit(self):
         """Venceu uma fase da expedição: contabiliza UMA vez, mostra o resultado e espera todos confirmarem."""
@@ -491,10 +505,10 @@ class Room:
         self.transit = {"rid": self.rid, "confirmed": set(), "final": final}
         nxt = LEVELS[e.current_map()]["name"] if not final else None
         self.broadcast({"t": "result", "rid": self.rid, "a": sim.attempt, "final": final, "step": e.step, "total": EXP_STEPS, "time": res["time"], "defeats": res["defeats"],
-                        "stats": e.stats(), "next": nxt, "limit": self.limit, "modality": MODALITY[self.size], "diff": self.difficulty, "diff_name": DIFF_NAMES[self.difficulty], "chapter": e.chap, "title": e.seq["title"], "seq": e.seq["id"]})
+                        "stats": e.stats(), "next": nxt, "limit": self.limit, "modality": MODALITY[self.size], "rule": self.rule, "diff": self.difficulty, "diff_name": DIFF_NAMES[self.difficulty], "chapter": e.chap, "title": e.seq["title"], "seq": e.seq["id"]})
         host = self.slots[self.host]
         if host and host.conn and host.conn.alive:      # o checkpoint é guardado no navegador do anfitrião (somente nas transições)
-            host.conn.send({"t": "ckpt", "c": None if final else e.checkpoint(), "mod": self.size, "limit": self.limit, "diff": self.difficulty, "seq": e.seq["id"], "done": final})
+            host.conn.send({"t": "ckpt", "c": None if final else e.checkpoint(), "mod": self.size, "limit": self.limit, "diff": self.difficulty, "rule": self.rule, "seq": e.seq["id"], "done": final})
         self.push_state()
 
     def go_next(self):
@@ -577,6 +591,7 @@ class Room:
                         else:
                             x, y = s.inp if now - s.inp_t < INPUT_STALE else (0.0, 0.0)
                         sim.set_input(i, x, y)
+                        sim.set_rescue(i, bool(s.rs and now - s.rs_t < RS_STALE))
                 if sim.phase == "wait":
                     # a fase é preparada em todos os navegadores antes da contagem; nenhum tempo corre enquanto isso
                     if self.all_loaded():
@@ -834,6 +849,26 @@ def handle(conn, m):
         room.new_exp()                                     # expedição sempre da modalidade e do tempo atuais
         room.notice(" ".join(msgs))
         room.push_state()
+    elif t == "rule":
+        # REGRA (Clássico/Resgate): só o anfitrião, só no lobby; muda a regra, então a expedição recomeça (resultados de regras diferentes não se misturam)
+        if conn.slot != room.host or room.phase != "lobby":
+            return
+        v = m.get("v")
+        if v not in RULES:
+            return err(conn, "A regra é Clássico ou Resgate.")
+        if v == room.rule:
+            return
+        room.rule = v
+        room.reset_ready()
+        if room.exp and room.exp.has_progress():
+            room.notice("Mudar a regra recomeça a expedição (resultados de regras diferentes não se misturam). O checkpoint antigo continua no navegador do anfitrião.")
+        room.new_exp()
+        room.notice(f"Regra: {RULE_NAMES[v]}." + (" Quem for atingido fica caído e um amigo pode resgatar (E ou botão Resgatar, 1,5 s)." if v == "rescue" else ""))
+        room.push_state()
+    elif t == "rs":
+        if room.phase != "playing":
+            return
+        me.rs, me.rs_t = bool(m.get("v")), time.monotonic()
     elif t == "diff":
         # DIFICULDADE (fácil/normal/difícil): independente do tempo; só o anfitrião, só fora de uma tentativa
         if conn.slot != room.host or room.phase != "lobby":
@@ -878,7 +913,7 @@ def handle(conn, m):
         if v not in ("free", "exp"):
             return
         room.mode = v
-        if v == "exp" and (room.exp is None or room.exp.n != room.size or room.exp.limit != room.limit or room.exp.diff != room.difficulty or room.exp.chap != room.chapter):
+        if v == "exp" and (room.exp is None or room.exp.n != room.size or room.exp.limit != room.limit or room.exp.diff != room.difficulty or room.exp.chap != room.chapter or room.exp.rule != room.rule):
             room.new_exp()
         room.reset_ready()
         room.push_state()
@@ -900,11 +935,11 @@ def handle(conn, m):
         elif a_ == "continue":
             ck = m.get("ck")
             if ck is None:
-                if room.exp and room.exp.has_progress() and room.exp.step < EXP_STEPS and room.exp.n == room.size and room.exp.limit == room.limit and room.exp.diff == room.difficulty and room.exp.chap == room.chapter:
+                if room.exp and room.exp.has_progress() and room.exp.step < EXP_STEPS and room.exp.n == room.size and room.exp.limit == room.limit and room.exp.diff == room.difficulty and room.exp.chap == room.chapter and room.exp.rule == room.rule:
                     room.mode = "exp"; room.reset_ready(); room.push_state()
                     return
                 return err(conn, "Não há expedição em andamento nesta sala. Use o checkpoint salvo neste navegador, se houver.")
-            x, why = validate_ckpt(ck, room.size, room.limit, room.difficulty, room.chapter)
+            x, why = validate_ckpt(ck, room.size, room.limit, room.difficulty, room.chapter, room.rule)
             if x is None:
                 return err(conn, why)
             room.exp, room.mode = x, "exp"

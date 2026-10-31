@@ -32,12 +32,14 @@
   const DIRS = [[0, 0], [1, 0], [_D, _D], [0, 1], [-_D, _D], [-1, 0], [-_D, -_D], [0, -1], [_D, -_D]];   // 0 parado, 1..8: E SE S SW W NW N NE
   // medições reais do painel de diagnóstico (nada aqui é estimado)
   const D = { resyncs: 0, lastResync: "", mismatch: 0, snapAt: 0, evAt: 0, on: false, frames: [], rtts: [], snapT: [], rxB: [], cmdMsg: [], cmdN: [], corr: [], stale: 0, dup: 0, lastCorr: 0, worst: 0 };
-  const BUILD = "2026-11-01-r1";   // versão desta página (o servidor confere: página antiga = elementos que podem não aparecer)
+  const BUILD = "2026-11-02-r1";   // versão desta página (o servidor confere: página antiga = elementos que podem não aparecer)
   const ENT_KEYS = ["walls", "plates", "gates", "spikes", "lasers", "saws", "drones", "portals"];
   const PRESETS = [10, 15, 20, 25, 30, 45, 60];
   const MARKS = [["📍", "Aqui!"], ["🆘", "Preciso de ajuda!"], ["🚪", "Vá para a saída!"]];
   const EMOS = [["👍", "Beleza!"], ["✋", "Espera!"], ["👉", "Vem aqui!"], ["⚠️", "Cuidado!"], ["🔑", "Pega a chave!"], ["🆘", "Preciso de ajuda!"]];
-  const WHY = { spike: "Espinhos atingiram", laser: "O laser atingiu", saw: "Uma serra atingiu", drone: "Um drone atingiu", crush: "Uma porta fechou sobre" };  // sem culpar ninguém
+  const RULE = { classic: "Clássico", rescue: "Resgate" };
+  const RESCUE_R = 70, RESCUE_T = 1.5;   // iguais aos do servidor (só para a dica visual; quem decide é o servidor)
+  const WHY = { alldown: "Todos caíram", nosafe: "Sem posição segura para", spike: "Espinhos atingiram", laser: "O laser atingiu", saw: "Uma serra atingiu", drone: "Um drone atingiu", crush: "Uma porta fechou sobre" };  // sem culpar ninguém
   const lsGet = (k) => { try { return localStorage.getItem(k) || ""; } catch (e) { return ""; } };
   const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch (e) {} };
   const ssGet = (k) => { try { return sessionStorage.getItem(k) || ""; } catch (e) { return ""; } };
@@ -206,7 +208,7 @@
         // Estado COMPLETO da fase (mapa + versão + entidades + número da partida). Um reenvio (resync) só troca o cenário, sem reiniciar nada.
         const same = m.resync && C.gid === m.gid && C.snap;
         C.gid = m.gid; C.lvAt = performance.now(); C.mver = m.mver; C.entSrv = m.ent || null; C.srvBuild = m.build || null;
-        C.level = m.level; C.roles = m.roles; C.total = m.total;
+        C.level = m.level; C.roles = m.roles; C.total = m.total; C.rule = m.rule || "classic"; C.rsHold = false; C.rsKey = false; C.rsBtn = false; C.rsSent = false;
         if (!same) {
           hideResult(); C.expInfo = m.exp || null;
           C.snap = null; C.pr = null; C.hist = []; C.outbox = []; C.ring = []; C.lastI = 0; C.result = null; C.att = 0; C.shown = [null, null, null]; C.pose = [null, null, null]; C.wonAt = 0; C.emos = []; C.marks = []; C.armed = -1; C.lastCount = -1;
@@ -294,8 +296,8 @@
       `comandos a caminho: ${C.hist.length}   buffer de interpolação: ${buf == null ? "—" : buf.toFixed(0) + " ms"}`,
       `eventos descartados: ${D.stale} antigos/de outra partida, ${D.dup} repetidos`,
       "— estado da partida —",
-      `mapa: ${lvl_.mid || "—"} v${C.mver || "—"} · partida ${C.gid || "—"} · tentativa ${C.att || "—"}`,
-      `sala: ${(C.room && C.room.modality) || "—"} · ${lvl_.diff ? DIFF[lvl_.diff] : "—"} · ${(C.room && C.room.limit) || "—"} s · página ${BUILD}${C.srvBuild && C.srvBuild !== BUILD ? " ≠ servidor " + C.srvBuild : ""}`,
+      `mapa: ${lvl_.mid || "—"} v${C.mver || "—"} · partida ${C.gid || "—"} · tentativa ${C.att || "—"} · regra ${RULE[C.rule || "classic"]}`,
+      `sala: ${(C.room && C.room.modality) || "—"} · ${lvl_.diff ? DIFF[lvl_.diff] : "—"} · ${RULE[(C.room && C.room.rule) || "classic"]} · ${(C.room && C.room.limit) || "—"} s · página ${BUILD}${C.srvBuild && C.srvBuild !== BUILD ? " ≠ servidor " + C.srvBuild : ""}`,
       `entidades servidor/recebido/desenhado: ${entLine}`,
       `último quadro há ${ago(D.snapAt)} · último evento há ${ago(D.evAt)} · ressincronizações: ${D.resyncs}${D.lastResync ? " (" + D.lastResync + ")" : ""} · divergências: ${D.mismatch} · erros de desenho: ${D.drawErrs || 0}${D.lastDrawErr ? " (" + D.lastDrawErr + ")" : ""}`,
       "eu: " + myfp,
@@ -350,11 +352,15 @@
     else { C.dispOff.x -= ex; C.dispOff.y -= ey; }                    // correção pequena: some aos poucos na tela
     C.pr = q;
   }
+  const myRs = () => (C.snap && C.snap.rs && C.you != null ? C.snap.rs[C.you] : null);
   function stepInput(now, dt) {
     const s = C.snap;
     if (!s || s.ph !== "play" || C.view !== "game" || !C.level || !C.pr) { C.acc = 0; return; }
     C.acc = Math.min(C.acc + dt, 0.1);
-    const code = dirCode(), closed = closedRects();
+    const me_ = myRs(), code = me_ && me_[0] === 1 ? 0 : dirCode(), closed = closedRects();     // caído: imóvel, nada de movimento previsto
+    const hold = !!(C.rule === "rescue" && !(me_ && me_[0] === 1) && (C.rsKey || C.rsBtn));
+    if (hold !== C.rsSent || (hold && now - (C.rsAt || 0) > 250)) { C.rsSent = hold; C.rsAt = now; send({ t: "rs", v: hold }); }   // ação de resgatar: sai ao mudar e é renovada enquanto segura
+    C.rsHold = hold;
     while (C.acc >= STEPDT) {
       C.acc -= STEPDT;
       if (code === 0 && C.lastCode === 0) continue;                    // parado: nada a enviar
@@ -417,26 +423,26 @@
   function allCkpts() {
     let all = {}; try { all = JSON.parse(lsGet(LS_CKPT) || "{}"); } catch (e) { all = {}; }
     const out = {};
-    Object.keys(all).forEach((k) => { const ck = all[k]; if (!ck || typeof ck !== "object" || !ck.seq) return; const key = k.includes("|") ? k : `${ck.mod}|${ck.seq.id}|${ck.diff || "normal"}`; out[key] = ck; });
+    Object.keys(all).forEach((k) => { const ck = all[k]; if (!ck || typeof ck !== "object" || !ck.seq) return; const key = k.includes("|") ? k : `${ck.mod}|${ck.seq.id}|${ck.diff || "normal"}`; out[key] = ck; });   // sem "rule" = Clássico
     return out;
   }
   /** Checkpoint deste navegador para a modalidade, capítulo e dificuldade atuais (só vale com o mesmo tempo). */
-  function localCkpt(size, limit, chap, diff) {
+  function localCkpt(size, limit, chap, diff, rule) {
     const sq = C.hi && C.hi.seqs && C.hi.seqs[`${size}-${chap}`];
     if (!sq) return { ck: null, why: "" };
-    const ck = allCkpts()[`${size}|${sq.id}|${diff}`];
+    const ck = allCkpts()[`${size}|${sq.id}|${diff}` + (rule === "rescue" ? "|rescue" : "")];
     if (!ck) return { ck: null, why: "" };
     if (!ck.seq || ck.seq.ver !== sq.ver) return { ck: null, why: "Há um checkpoint de uma versão antiga desta expedição; ele não vale mais." };
     if (ck.limit !== limit) return { ck, why: `Há um checkpoint salvo com ${ck.limit} s por fase (fase ${ck.next + 1} de 6). Para continuar, o tempo da sala precisa ser ${ck.limit} s.`, blocked: true };
     return { ck, why: "" };
   }
   function saveCkpt(m) {
-    const all = allCkpts(), key = `${m.mod}|${m.seq || ""}|${m.diff || "normal"}`;
+    const all = allCkpts(), key = `${m.mod}|${m.seq || ""}|${m.diff || "normal"}` + (m.rule === "rescue" ? "|rescue" : "");
     if (m.done || !m.c) { const old = all[key]; if (old && old.limit === m.limit) delete all[key]; } else all[key] = m.c;
     lsSet(LS_CKPT, JSON.stringify(all));
   }
   /** Recordes e conclusões SEPARADOS por modalidade + dificuldade + tempo por tentativa (nunca se comparam configurações diferentes). */
-  function recKey(room) { return `${room.size}|${room.difficulty || "normal"}|${room.limit}`; }
+  function recKey(room) { return `${room.size}|${room.difficulty || "normal"}|${room.limit}` + (room.rule === "rescue" ? "|rescue" : ""); }   // Clássico mantém a chave antiga (recordes antigos = Clássico)
   function loadRecs() { try { return JSON.parse(lsGet(LS_REC) || "{}"); } catch (e) { return {}; } }
   function noteWin(mid, time) {
     const r = C.room; if (!r || !mid) return;
@@ -458,7 +464,7 @@
   /** Impressão digital do que ESTE navegador tem e desenhou: dá para comparar entre jogadores no painel de diagnóstico. */
   function fingerprint() {
     const c = C.drawn || {}, l = C.level || {};
-    return `${l.mid || "-"}@${C.mver || "-"}|g${C.gid || 0}|a${C.att || 0}|${(C.room && C.room.size) || "?"}j|${l.diff || "-"}|` + ENT_KEYS.map((k) => `${k.slice(0, 2)}${c[k] == null ? "?" : c[k]}`).join("");
+    return `${l.mid || "-"}@${C.mver || "-"}|g${C.gid || 0}|a${C.att || 0}|${(C.room && C.room.size) || "?"}j|${l.diff || "-"}|${(C.rule || "classic")[0]}|` + ENT_KEYS.map((k) => `${k.slice(0, 2)}${c[k] == null ? "?" : c[k]}`).join("");
   }
   function nP() { return C.roles && C.roles.length ? C.roles.length : 3; }
   function onEvent(e) {
@@ -468,13 +474,18 @@
     else if (k === "plate") { if (e[2]) sfx("blip"); }
     else if (k === "rs") { sfx("blip"); banner(`🔄 ${name(e[1])} reiniciou a tentativa para todos.`, "info", 3000); }
     else if (k === "esc") { if (e[2]) sfx("portal"); }
+    else if (k === "down") { sfx("lose"); banner(`🆘 ${roleOf(e[1]).icon} ${name(e[1])} caiu${WHY[e[2]] ? " (" + WHY[e[2]].toLowerCase() + ")" : ""}! Um amigo pode resgatar: fique perto e segure E (ou o botão Resgatar).`, "bad", 4000); }
+    else if (k === "rescued") { sfx("win"); banner(`🛟 ${name(e[2])} resgatou ${name(e[1])}! Proteção de 1,5 s.`, "good", 3000); }
+    else if (k === "rstart") { sfx("blip"); }
+    else if (k === "rcancel") { /* o progresso volta a zero: a barra do caído mostra */ }
+    else if (k === "unprot") { /* fim da proteção */ }
     else if (k === "tp") { sfx("portal"); }
-    else if (k === "win") { try { noteWin(C.level && C.level.mid, e[1] && e[1].time); } catch (x) {} sfx("win"); if (!C.expInfo && C.lastRec) banner(`Tempo ${C.lastRec.time.toFixed(1)} s` + (C.lastRec.isNew ? (C.lastRec.prev == null ? " — primeira vez nesta configuração!" : " — novo recorde!") : ` (melhor: ${C.lastRec.prev.toFixed(1)} s)`) + ` · ${MOD[C.room.size]} · ${DIFF[C.room.difficulty]} · ${C.room.limit} s`, "good", 4500); }
+    else if (k === "win") { try { noteWin(C.level && C.level.mid, e[1] && e[1].time); } catch (x) {} sfx("win"); if (!C.expInfo && C.lastRec) banner(`Tempo ${C.lastRec.time.toFixed(1)} s` + (C.lastRec.isNew ? (C.lastRec.prev == null ? " — primeira vez nesta configuração!" : " — novo recorde!") : ` (melhor: ${C.lastRec.prev.toFixed(1)} s)`) + ` · ${MOD[C.room.size]} · ${DIFF[C.room.difficulty]} · ${RULE[C.room.rule || "classic"]} · ${C.room.limit} s`, "good", 4500); }
     else if (k === "go") { sfx("blip"); C.goFlash = performance.now(); }
     else if (k === "lose") {
       sfx("lose");
       const who = e[1];
-      C.loseText = who >= 0 && WHY[e[2]] ? `${WHY[e[2]]} ${roleOf(who).icon} ${name(who)}` : "⏱ Tempo esgotado";
+      C.loseText = e[2] === "alldown" ? "🆘 Todos caíram" : who >= 0 && WHY[e[2]] ? `${WHY[e[2]]} ${roleOf(who).icon} ${name(who)}` : "⏱ Tempo esgotado";
       C.loseUntil = performance.now() + 2200;
       banner("Tentativa encerrada para todos. " + C.loseText + ". Reiniciando…", "bad", 2300);
     }
@@ -504,6 +515,12 @@
       b.textContent = DIFF[d]; b.disabled = !isHost() || r.phase !== "lobby"; b.addEventListener("click", () => send({ t: "diff", v: d })); dEl.appendChild(b);
     });
     $("co-diff-note").textContent = `${DIFF_HELP[r.difficulty]} Tempo e dificuldade são escolhas independentes.` + (r.difficulty !== "normal" ? " Os mapas clássicos só existem em Normal." : "");
+    const rEl = $("co-rule"); rEl.textContent = "";
+    ["classic", "rescue"].forEach((v) => {
+      const b = document.createElement("button"); b.type = "button"; b.setAttribute("role", "radio"); b.setAttribute("aria-checked", String(v === (r.rule || "classic")));
+      b.textContent = RULE[v]; b.disabled = !isHost() || r.phase !== "lobby"; b.addEventListener("click", () => send({ t: "rule", v })); rEl.appendChild(b);
+    });
+    $("co-rule-note").textContent = (r.rule === "rescue" ? "Resgate: quem for atingido fica caído e um amigo pode resgatar (fique perto, parado, e segure E ou o botão Resgatar por 1,5 s). Se todos caírem, ou o tempo acabar, a tentativa termina." : "Clássico: se alguém for atingido, a tentativa termina para todos.") + (isHost() ? " Mudar a regra recomeça a expedição (recordes e checkpoints são separados por regra)." : " Só o anfitrião escolhe a regra.");
     const present = r.players.slice(0, size).filter(Boolean).length;
     $("co-vagas").textContent = `${MOD[size]} · participantes: ${present} de ${size}` + (present < size ? ` · ${size - present} vaga${size - present > 1 ? "s" : ""} livre${size - present > 1 ? "s" : ""}` : " · sala completa");
     const list = $("co-slots"); list.textContent = "";
@@ -577,7 +594,7 @@
     const start = $("co-start");
     start.classList.toggle("hidden", !isHost());
     start.disabled = !!why;
-    { const tgt = lvl(targetOf(r)); $("co-summary").textContent = `Configuração: ${MOD[size]} · ${DIFF[r.difficulty]} · ${r.limit} s por tentativa · ` + (r.mode === "exp" && r.exp ? `${r.exp.title}${r.exp.available ? "" : " (indisponível nesta dificuldade)"}` : (tgt ? `mapa "${tgt.name}"` : "nenhum mapa escolhido")); }
+    { const tgt = lvl(targetOf(r)); $("co-summary").textContent = `Configuração: ${MOD[size]} · ${DIFF[r.difficulty]} · regra ${RULE[r.rule || "classic"]} · ${r.limit} s por tentativa · ` + (r.mode === "exp" && r.exp ? `${r.exp.title}${r.exp.available ? "" : " (indisponível nesta dificuldade)"}` : (tgt ? `mapa "${tgt.name}"` : "nenhum mapa escolhido")); }
     start.textContent = r.mode === "exp" && r.exp ? `Começar expedição (fase ${Math.min(r.exp.step + 1, 6)} de 6) ▶` : "Começar ▶";
     $("co-start-note").textContent = isHost() ? (why || "Tudo pronto!") : "Aguardando o anfitrião começar.";
   }
@@ -602,7 +619,7 @@
     const row = document.createElement("div"); row.className = "row";
     const mem = e.progress && e.step < e.total;
     if (mem) { const note = document.createElement("p"); note.className = "small"; note.textContent = "Progresso guardado nesta sala (dura enquanto a sala existir). A fase pendente recomeça do início; ninguém precisa ter jogado as anteriores: o progresso é da expedição, não de cada pessoa."; el.appendChild(note); }
-    const lc = localCkpt(r.size, r.limit, r.chapter, r.difficulty);
+    const lc = localCkpt(r.size, r.limit, r.chapter, r.difficulty, r.rule);
     if (host && lc.ck && !lc.blocked && !(mem && e.step === lc.ck.next)) {
       const b = document.createElement("button"); b.type = "button"; b.className = "btn btn-ghost"; b.disabled = r.phase !== "lobby";
       b.textContent = `▶ Continuar do checkpoint (fase ${lc.ck.next + 1} de 6 · ${lc.ck.stats.defeats} derrota${lc.ck.stats.defeats === 1 ? "" : "s"} · ${lc.ck.stats.active.toFixed(1)} s)`;
@@ -627,8 +644,8 @@
     const h = document.createElement("h1"); h.textContent = m.final ? "Expedição concluída! 🏆" : `Fase ${m.step} de ${m.total} concluída! 🎉`; p.appendChild(h);
     const st = document.createElement("div"); st.className = "co-stats";
     const lines = m.final
-      ? [`Configuração: ${m.modality} · ${m.diff_name || "Normal"} · ${m.limit} s por tentativa · ${m.title || ""}`, `Fases concluídas: ${m.stats.done} de ${m.total}`, `Tempo ativo total: ${m.stats.active.toFixed(1)} s`, `Derrotas totais: ${m.stats.defeats}`, "Resultados e recordes valem só para esta configuração."].concat(m.stats.per.map((x, i) => `${i + 1}. ${(lvl(C.room && C.room.exp ? C.room.exp.maps[i] : null) || {}).name || x.mid}: ${x.time.toFixed(1)} s, ${x.defeats} derrota${x.defeats === 1 ? "" : "s"}`))
-      : [`Configuração: ${m.modality} · ${m.diff_name || "Normal"} · ${m.limit} s por tentativa · ${m.title || ""}`, `Tempo desta fase: ${m.time.toFixed(1)} s de ${m.limit} s${C.lastRec && C.lastRec.mid === (m.stats.per[m.stats.per.length - 1] || {}).mid ? (C.lastRec.isNew ? (C.lastRec.prev == null ? " · primeira vez nesta configuração" : " · NOVO RECORDE nesta configuração") : ` · melhor nesta configuração: ${C.lastRec.prev.toFixed(1)} s`) : ""}`, `Derrotas nesta fase: ${m.defeats}`, `Progresso da expedição: ${m.step} de ${m.total}`, `Total até aqui: ${m.stats.active.toFixed(1)} s ativos · ${m.stats.defeats} derrota${m.stats.defeats === 1 ? "" : "s"}`, `Próxima: ${m.next}`];
+      ? [`Configuração: ${m.modality} · ${m.diff_name || "Normal"} · regra ${RULE[m.rule || "classic"]} · ${m.limit} s por tentativa · ${m.title || ""}`, `Fases concluídas: ${m.stats.done} de ${m.total}`, `Tempo ativo total: ${m.stats.active.toFixed(1)} s`, `Derrotas totais: ${m.stats.defeats}`, "Resultados e recordes valem só para esta configuração."].concat(m.stats.per.map((x, i) => `${i + 1}. ${(lvl(C.room && C.room.exp ? C.room.exp.maps[i] : null) || {}).name || x.mid}: ${x.time.toFixed(1)} s, ${x.defeats} derrota${x.defeats === 1 ? "" : "s"}`))
+      : [`Configuração: ${m.modality} · ${m.diff_name || "Normal"} · regra ${RULE[m.rule || "classic"]} · ${m.limit} s por tentativa · ${m.title || ""}`, `Tempo desta fase: ${m.time.toFixed(1)} s de ${m.limit} s${C.lastRec && C.lastRec.mid === (m.stats.per[m.stats.per.length - 1] || {}).mid ? (C.lastRec.isNew ? (C.lastRec.prev == null ? " · primeira vez nesta configuração" : " · NOVO RECORDE nesta configuração") : ` · melhor nesta configuração: ${C.lastRec.prev.toFixed(1)} s`) : ""}`, `Derrotas nesta fase: ${m.defeats}`, `Progresso da expedição: ${m.step} de ${m.total}`, `Total até aqui: ${m.stats.active.toFixed(1)} s ativos · ${m.stats.defeats} derrota${m.stats.defeats === 1 ? "" : "s"}`, `Próxima: ${m.next}`];
     st.textContent = lines.join("\n"); st.style.whiteSpace = "pre-line"; p.appendChild(st);
     const acts = document.createElement("div"); acts.className = "ov-actions";
     if (!m.final) {
@@ -692,13 +709,19 @@
     for (let i = 0; i < nP(); i++) {
       const d = $("co-chip" + i); if (!d) continue;
       const esc = s && s.p[i][2] === 1, r = roleOf(i), p = C.room && C.room.players[i];
-      d.textContent = `${r.icon} ${name(i)}${i === C.you ? " (você)" : ""}${esc ? " ✔" : ""}${p && !p.on ? " ⚠" : ""}`;
+      const rs_ = s && s.rs ? s.rs[i] : null;
+      d.textContent = `${r.icon} ${name(i)}${i === C.you ? " (você)" : ""}${esc ? " ✔" : ""}${rs_ && rs_[0] === 1 ? " 🆘" : ""}${rs_ && rs_[0] === 2 ? " 🛡" : ""}${p && !p.on ? " ⚠" : ""}`;
       d.classList.toggle("done", !!esc); d.classList.toggle("me", i === C.you);
     }
     $("co-att").textContent = s ? `Tentativa ${s.a}` : "";
     $("co-key").textContent = s && s.k ? "🗝 chave pega" : "🗝 chave: falta pegar";
     $("co-key").classList.toggle("on", !!(s && s.k));
     $("co-restart").classList.toggle("hidden", !isHost());
+    { const rb = $("co-rescue"), on = C.rule === "rescue" && C.view === "game", ms = myRs(), sh = C.shown[C.you];
+      rb.classList.toggle("hidden", !on);
+      let near = false;
+      if (on && s && s.rs && sh && ms && ms[0] !== 1) for (let i = 0; i < s.rs.length; i++) if (i !== C.you && s.rs[i][0] === 1 && Math.hypot(sh.x - s.p[i][0], sh.y - s.p[i][1]) <= RESCUE_R) near = true;
+      rb.classList.toggle("near", near); rb.disabled = !!(ms && ms[0] === 1); }
   }
   function updatePaused() {
     const r = C.room; if (!r || C.view !== "game") return;
@@ -717,7 +740,7 @@
     const has = (k) => keys.has(k) || padDirs.has(k);
     return [(has("r") ? 1 : 0) - (has("l") ? 1 : 0), (has("d") ? 1 : 0) - (has("u") ? 1 : 0)];
   }
-  function releaseDir() { keys.clear(); padDirs.clear(); document.querySelectorAll("#co-pad .dir.active").forEach((b) => b.classList.remove("active")); pushDir(true); }
+  function releaseDir() { C.rsKey = false; C.rsBtn = false; const rb = $("co-rescue"); if (rb) rb.classList.remove("active"); keys.clear(); padDirs.clear(); document.querySelectorAll("#co-pad .dir.active").forEach((b) => b.classList.remove("active")); pushDir(true); }
   function pushDir() { /* os comandos de movimento saem do laço de quadros (stepInput): numerados, em lote, 1 por 1/60 s */ }
   const typing = (t) => t && t.closest && t.closest("input, textarea, select");
   window.addEventListener("keydown", (e) => {
@@ -729,9 +752,10 @@
     if (!$("co-pop").classList.contains("hidden")) return;
     if (KEYMAP[e.code]) { keys.add(KEYMAP[e.code]); e.preventDefault(); pushDir(false); return; }
     if (/^Digit[1-6]$/.test(e.code)) { send({ t: "emo", k: +e.code.slice(5) - 1 }); return; }
+    if (e.code === "KeyE" && C.rule === "rescue") { C.rsKey = true; e.preventDefault(); return; }
     if (e.code === "KeyR" && isHost() && !e.repeat) { send({ t: "restart", a: C.snap ? C.snap.a : undefined }); }
   }, true);
-  window.addEventListener("keyup", (e) => { if (KEYMAP[e.code]) { keys.delete(KEYMAP[e.code]); pushDir(false); } }, true);
+  window.addEventListener("keyup", (e) => { if (e.code === "KeyE") C.rsKey = false; if (KEYMAP[e.code]) { keys.delete(KEYMAP[e.code]); pushDir(false); } }, true);
   window.addEventListener("blur", releaseDir);
   document.addEventListener("visibilitychange", () => { if (document.hidden) releaseDir(); });
   document.querySelectorAll("#co-pad .dir").forEach((b) => {
@@ -741,6 +765,10 @@
     b.addEventListener("pointerup", up); b.addEventListener("pointercancel", up); b.addEventListener("lostpointercapture", up);
     b.addEventListener("contextmenu", (e) => e.preventDefault());
   });
+  { const rb = $("co-rescue");
+    rb.addEventListener("pointerdown", (e) => { e.preventDefault(); try { rb.setPointerCapture(e.pointerId); } catch (x) {} C.rsBtn = true; rb.classList.add("active"); });
+    const up = () => { C.rsBtn = false; rb.classList.remove("active"); };
+    rb.addEventListener("pointerup", up); rb.addEventListener("pointercancel", up); rb.addEventListener("lostpointercapture", up); rb.addEventListener("contextmenu", (e) => e.preventDefault()); }
   /** Marcações sem texto livre: escolha uma e toque no mapa (toque de novo no botão para marcar onde você está). */
   function placeMark(k, x, y) {
     const now = performance.now();
@@ -1012,8 +1040,17 @@
         ctx.lineWidth = i === C.you ? 3 : 2; ctx.strokeStyle = r.color; ctx.globalAlpha = i === C.you ? 1 : 0.8;
         glow(r.color, 10); ctx.beginPath(); ctx.ellipse(0, 11, 14, 5, 0, 0, Math.PI * 2); ctx.stroke(); noGlow(); ctx.globalAlpha = 1;
         ctx.restore();
+        const rs_ = s.rs ? s.rs[i] : null, down = !!(rs_ && rs_[0] === 1), prot = !!(rs_ && rs_[0] === 2);
+        if (down) { ctx.save(); ctx.globalAlpha = 0.45; ctx.filter = "grayscale(1)"; }
         if (API.drawCharacter) API.drawCharacter(ctx, sh.x, sh.y, skin, po);
         else { ctx.save(); ctx.translate(sh.x, sh.y); glow(r.color, 12); ctx.fillStyle = r.color; ctx.beginPath(); ctx.arc(0, 0, 11, 0, 7); ctx.fill(); noGlow(); ctx.restore(); }
+        if (down) { ctx.restore(); ctx.filter = "none"; }
+        if (prot) { ctx.save(); ctx.translate(sh.x, sh.y); ctx.globalAlpha = 0.5 + 0.3 * Math.sin(now / 90); ctx.strokeStyle = "#19f0ff"; ctx.lineWidth = 3; glow("#19f0ff", 12); ctx.beginPath(); ctx.arc(0, 0, 19, 0, 7); ctx.stroke(); noGlow(); ctx.restore(); }
+        if (down) {   // zona de resgate + barra de progresso
+          ctx.save(); ctx.translate(sh.x, sh.y); ctx.strokeStyle = "rgba(255,210,63,.45)"; ctx.setLineDash([5, 5]); ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(0, 0, RESCUE_R, 0, 7); ctx.stroke(); ctx.setLineDash([]);
+          ctx.fillStyle = "rgba(7,6,15,.85)"; ctx.fillRect(-22, 20, 44, 7); ctx.fillStyle = "#ffd23f"; ctx.fillRect(-21, 21, 42 * Math.min(1, rs_[1]), 5);
+          ctx.font = "bold 12px sans-serif"; ctx.textAlign = "center"; ctx.fillStyle = "#ffd23f"; ctx.fillText("🆘", 0, -34); ctx.restore();
+        }
         ctx.save(); ctx.translate(sh.x, sh.y);
         ctx.font = "bold 11px sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "alphabetic"; ctx.lineWidth = 3; ctx.strokeStyle = "rgba(7,6,15,.9)";
         const label = (i === C.you ? "▼ " : "") + r.icon + " " + name(i) + (tg[2] === 1 ? " ✔" : ""); ctx.strokeText(label, 0, -22); ctx.fillStyle = i === C.you ? "#fff" : r.color; ctx.fillText(label, 0, -22);

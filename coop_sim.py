@@ -28,6 +28,9 @@ SAW_SLACK = 3
 COUNTDOWN = 3.0
 START_SLOTS = {1: [1], 2: [0, 2], 3: [0, 1, 2]}   # quais pontos de largada cada tamanho de sala usa
 LOSE_PAUSE = 2.2
+RESCUE_R = 70.0          # alcance do resgate (distância entre os centros)
+RESCUE_TIME = 1.5        # segundos mantendo a ação perto do caído
+PROT_TIME = 1.5          # proteção contra danos depois do resgate
 PORTAL_R = 18            # área de ativação do portal (centro do jogador) — igual à campanha (engine.js)
 PORTAL_EXIT = PORTAL_R + PLAYER_R   # distância para "sair" da área de chegada e o portal destravar
 WARN = 0.5
@@ -92,12 +95,13 @@ def saw_pos(m, t):
 
 
 class Sim:
-    def __init__(self, level, roles, limit=None, wait=False):
+    def __init__(self, level, roles, limit=None, wait=False, rescue=False):
         self.lv = level
         # papéis de cada vaga: lista de ids (com menos de 3 jogadores, um jogador acumula papéis)
         self.roles = [[r] if isinstance(r, str) else list(r) for r in roles]
         self.n = len(self.roles)          # 1..3 jogadores
         self.limit = float(limit) if limit else float(level["time"])   # tempo da tentativa (escolhido no lobby)
+        self.rescue = bool(rescue)        # regra "Resgate": atingido fica caído e pode ser recuperado; senão "Clássico" (uma morte encerra a tentativa)
         self._wait = bool(wait)           # True: só começa a contagem quando o servidor chamar begin()
         self.attempt = 0
         self.inp = [(0.0, 0.0)] * self.n
@@ -111,7 +115,14 @@ class Sim:
         idx = list(range(self.n)) if len(lv["starts"]) == self.n else START_SLOTS[self.n]     # fases novas trazem uma largada por jogador
         self.pos = [[float(lv["starts"][k][0]), float(lv["starts"][k][1])] for k in idx]
         self.esc = [False] * self.n
-        self.lock = [None] * self.n          # portal em que o jogador acabou de chegar: só reativa depois que ele sair da área
+        self.lock = [None] * self.n
+        self.st = [0] * self.n               # Resgate: 0 ativo, 1 caído, 2 protegido
+        self.prot_until = [0.0] * self.n
+        self.rprog = [0.0] * self.n          # segundos de resgate acumulados em cada caído
+        self.rby = [-1] * self.n             # quem está resgatando cada caído (-1 = ninguém)
+        self.hold = [False] * self.n         # quem está mantendo a ação de resgatar
+        self.trail = [[(float(p[0]), float(p[1]))] for p in self.pos]   # últimas posições SEGURAS de cada jogador
+        self._trail_t = 0.0          # portal em que o jogador acabou de chegar: só reativa depois que ele sair da área
         self.has_key = False
         self.latched = [False] * len(lv["plates"])
         self.pressed = [False] * len(lv["plates"])
@@ -137,6 +148,10 @@ class Sim:
             self.phase = "count"
             self.count = secs
             self._resume_play = True
+
+    def set_rescue(self, slot, on):
+        if isinstance(slot, int) and 0 <= slot < self.n:
+            self.hold[slot] = bool(on)
 
     def set_input(self, slot, x, y):
         if not (isinstance(slot, int) and 0 <= slot < self.n):
@@ -223,15 +238,18 @@ class Sim:
         closed = self._closed_gates()
         # 1) movimento
         for i in range(self.n):
+            if self.rescue and self.st[i] == 1:
+                continue                                  # caído: imóvel
             ux, uy = self.inp[i]
             if ux or uy:
                 self._move(self.pos[i], ux * SPEED * dt, uy * SPEED * dt, closed)
         # 1b) portais (iguais aos da campanha): entrar leva ao outro; fica travado até sair da área de chegada
         for i in range(self.n):
-            self._portals(i)
+            if not (self.rescue and self.st[i] == 1):
+                self._portals(i)
         # 2) placas (segurar) e interruptores (ficam ligados); vários jogadores na mesma placa não alternam nada
         for k, pl in enumerate(lv["plates"]):
-            on = any(math.hypot(self.pos[i][0] - pl["x"], self.pos[i][1] - pl["y"]) < PLATE_R for i in range(self.n))
+            on = any(math.hypot(self.pos[i][0] - pl["x"], self.pos[i][1] - pl["y"]) < PLATE_R for i in range(self.n) if not (self.rescue and self.st[i] == 1))
             if on != self.pressed[k]:
                 self.pressed[k] = on
                 self.events.append(("plate", k, on))
@@ -256,6 +274,11 @@ class Sim:
         d = lv["door"]
         for i in range(self.n):
             px, py = self.pos[i]
+            if self.rescue and self.st[i] == 1:               # caído: não coleta, não conta na saída
+                if self.esc[i]:
+                    self.esc[i] = False
+                    self.events.append(("esc", i, False))
+                continue
             if not self.has_key and (px - lv["key"][0]) ** 2 + (py - lv["key"][1]) ** 2 < (PLAYER_R + KEY_R) ** 2:
                 self.has_key = True
                 self.events.append(("key", i))
@@ -263,11 +286,25 @@ class Sim:
             if inside != self.esc[i]:
                 self.esc[i] = inside
                 self.events.append(("esc", i, inside))
-        # 4) perigos: qualquer jogador atingido encerra a tentativa de todos
-        for i in range(self.n):
-            why = self._hazard(i)
-            if why:
-                return self._lose(i, why)
+        # 4) perigos. Clássico: qualquer jogador atingido encerra a tentativa de todos. Resgate: o atingido cai e pode ser recuperado.
+        if self.rescue:
+            self._trail_update()
+            for i in range(self.n):
+                if self.st[i] != 0:
+                    continue                                  # caído ou protegido: não sofre dano
+                why = self._hazard(i)
+                if why:
+                    self._fall(i, why)
+                    if self.phase != "play":
+                        return
+            self._rescue(dt)
+            if all(x == 1 for x in self.st):
+                return self._lose(-1, "alldown")
+        else:
+            for i in range(self.n):
+                why = self._hazard(i)
+                if why:
+                    return self._lose(i, why)
         # 5) vitória (todos dentro da saída, com a chave) / tempo
         if self.has_key and all(self.esc):
             self.phase = "won"
@@ -277,6 +314,101 @@ class Sim:
         if self.t >= self.limit:
             self.t = self.limit
             return self._lose(-1, "time")
+
+    # ---------------------------------------------------------------- Resgate
+    def _persist(self, x, y):
+        """O ponto está numa área PERSISTENTEMENTE perigosa (espinhos, feixe de laser — mesmo apagado —, serras)? Drones são passageiros: não contam."""
+        lv = self.lv; R = PLAYER_R + 5
+        for sp in lv["spikes"]:
+            if circle_rect(x, y, R, [sp[0] + SPIKE_INSET, sp[1] + SPIKE_INSET, sp[2] - 2 * SPIKE_INSET, sp[3] - 2 * SPIKE_INSET]):
+                return True
+        for l in lv["lasers"]:
+            if circle_rect(x, y, R, l["r"]):
+                return True
+        for m in lv["saws"]:
+            sx, sy = saw_pos(m, self.t)
+            if (x - sx) ** 2 + (y - sy) ** 2 < (R + m["r"]) ** 2:
+                return True
+        return False
+
+    def _valid_spot(self, x, y):
+        if not (PLAYER_R <= x <= W - PLAYER_R and PLAYER_R <= y <= H - PLAYER_R):
+            return False
+        return not self._hits_wall(x, y, self._closed_gates()) and not self._persist(x, y)
+
+    def _clear_path(self, a, b):
+        """segmento a→b sem paredes nem portas fechadas (o jogador nunca é reposicionado atravessando barreiras)"""
+        closed = self._closed_gates()
+        d = math.hypot(b[0] - a[0], b[1] - a[1]); n = max(1, int(d / 4))
+        return all(not self._hits_wall(a[0] + (b[0] - a[0]) * k / n, a[1] + (b[1] - a[1]) * k / n, closed) for k in range(n + 1))
+
+    def _trail_update(self):
+        if self.t - self._trail_t < 0.1:
+            return
+        self._trail_t = self.t
+        for i in range(self.n):
+            if self.st[i] != 1 and self._valid_spot(self.pos[i][0], self.pos[i][1]):
+                tr = self.trail[i]
+                tr.append((self.pos[i][0], self.pos[i][1]))
+                if len(tr) > 60:
+                    del tr[0]
+
+    def _fall(self, i, why):
+        x, y = self.pos[i]
+        spot = (x, y) if self._valid_spot(x, y) else None
+        if spot is None:                                       # estava numa área perigosa: usa a posição segura mais recente ALCANÇÁVEL sem atravessar barreiras
+            for c in reversed(self.trail[i]):
+                if self._valid_spot(c[0], c[1]) and self._clear_path(c, (x, y)):
+                    spot = c
+                    break
+        if spot is None:
+            return self._lose(i, "nosafe")
+        self.pos[i][0], self.pos[i][1] = float(spot[0]), float(spot[1])
+        self.st[i] = 1; self.rprog[i] = 0.0; self.rby[i] = -1
+        self.events.append(("down", i, why, round(spot[0], 1), round(spot[1], 1)))
+
+    def _rescue(self, dt):
+        n = self.n
+        for i in range(n):
+            if self.st[i] == 2 and self.t >= self.prot_until[i]:
+                self.st[i] = 0
+                self.events.append(("unprot", i))
+        down = [t for t in range(n) if self.st[t] == 1]
+        if not down:
+            return
+        want = {}
+        for r in range(n):
+            if not self.hold[r] or self.st[r] not in (0, 2):
+                continue                                       # só quem está ativo (ou protegido) pode resgatar
+            ux, uy = self.inp[r]
+            if ux or uy:
+                continue                                       # precisa ficar parado
+            best, bd = None, RESCUE_R
+            for t in down:
+                if t == r:
+                    continue
+                d = math.hypot(self.pos[r][0] - self.pos[t][0], self.pos[r][1] - self.pos[t][1])
+                if d <= bd:
+                    best, bd = t, d
+            if best is not None:
+                want[r] = best
+        for t in down:
+            cands = sorted(r for r, tt in want.items() if tt == t)
+            act = self.rby[t] if self.rby[t] in cands else (cands[0] if cands else -1)
+            if act == -1:                                      # ninguém válido: o progresso se perde
+                if self.rby[t] != -1:
+                    self.events.append(("rcancel", self.rby[t], t))
+                self.rby[t] = -1; self.rprog[t] = 0.0
+                continue
+            if self.rby[t] != act:                             # outro resgatador assumiu: recomeça (dois não somam)
+                self.rby[t] = act; self.rprog[t] = 0.0
+                self.events.append(("rstart", act, t))
+            self.rprog[t] += dt                                # um só relógio por caído, mesmo com vários por perto
+            if self.rprog[t] >= RESCUE_TIME:
+                self.st[t] = 2; self.prot_until[t] = self.t + PROT_TIME
+                self.events.append(("rescued", t, act))
+                self.rprog[t] = 0.0; self.rby[t] = -1
+                self.trail[t] = [(self.pos[t][0], self.pos[t][1])]
 
     def _portals(self, i):
         pt = self.lv.get("portals")
@@ -343,4 +475,6 @@ class Sim:
             "g": [1 if o else 0 for o in self.gate_open],
             "pl": [1 if (self.pressed[k] or self.latched[k]) else 0 for k in range(len(self.pressed))],
             "k": 1 if self.has_key else 0,
+            **({"rs": [[self.st[i], round(self.rprog[i] / RESCUE_TIME, 2) if self.st[i] == 1 else 0, self.rby[i] if self.st[i] == 1 else -1,
+                        round(max(0.0, self.prot_until[i] - self.t), 2) if self.st[i] == 2 else 0] for i in range(self.n)]} if self.rescue else {}),
         }
