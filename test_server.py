@@ -84,13 +84,16 @@ async def main():
         for x in (a, b, c): check("handshake 101", await x.connect())
         hi = await a.expect("hi"); check("hello traz catálogo de fases e papéis", hi and len(hi["levels"]) == 5 and set(hi["roles"]) == {"brasa", "onda", "folha"})
         b.send(t="join", code="ZZZZ", name="x"); e = await b.expect("err"); check("sala inexistente dá erro", e and "não encontrada" in e["msg"])
-        a.send(t="create", name="Ana"); j = await a.expect("joined"); check("criar sala devolve código de 4 letras", j and len(j["code"]) == 4 and j["you"] == 0)
+        a.send(t="create", name="Ana", skin="robot"); j = await a.expect("joined"); check("criar sala devolve código de 4 letras", j and len(j["code"]) == 4 and j["you"] == 0)
         code = j["code"]
-        b.send(t="join", code=code.lower(), name="Bia"); j = await b.expect("joined"); check("entrar com o código (minúsculas)", j and j["you"] == 1)
+        b.send(t="join", code=code.lower(), name="Bia", skin="<script>"); j = await b.expect("joined"); check("entrar com o código (minúsculas)", j and j["you"] == 1)
         a.send(t="start"); e = await a.expect("err"); check("não começa com 2 jogadores", e and "3 jogadores" in e["msg"])
         c.send(t="join", code=code, name="<b>Caio</b>"); j = await c.expect("joined"); check("terceiro entra", j and j["you"] == 2)
         d4 = WS(); await d4.connect(); d4.send(t="join", code=code, name="Dani"); e = await d4.expect("err"); check("quarto jogador é recusado (sala cheia)", e and "cheia" in e["msg"])
         await asyncio.sleep(0.2)
+        check("skin válida é repassada e inválida vira explorer", c.room and [p["skin"] for p in c.room["players"]] == ["robot", "explorer", "explorer"], c.room)
+        c.send(t="skin", id="ninja"); await asyncio.sleep(0.15)
+        check("jogador troca a própria skin", a.room["players"][2]["skin"] == "ninja")
         check("nomes são limpos (sem < >)", c.room and c.room["players"][2]["name"] == "bCaiob" or (c.room and "<" not in c.room["players"][2]["name"]), c.room)
         a.send(t="role", role="brasa"); b.send(t="role", role="brasa"); await asyncio.sleep(0.2)
         e = await b.expect("err"); check("papel repetido é recusado", e and "já foi escolhido" in e["msg"])
@@ -128,8 +131,11 @@ async def main():
         check("eventos de chave e vitória chegaram", any(e[0] == "key" for e in a.events) and any(e[0] == "win" for e in a.events), a.events[-5:])
         check("todos chegaram à porta (3 escapados)", all(p[2] == 1 for p in a.snap["p"]), a.snap["p"])
         print(f"         partida de verdade levou {time.monotonic()-t0:.1f}s")
-        b.send(t="next"); await asyncio.sleep(0.3); check("só o anfitrião avança de fase", a.level["n"] == 0)
-        a.send(t="next"); await asyncio.sleep(0.5); check("anfitrião avança para a fase 2", a.level["n"] == 1 and b.level["n"] == 1)
+        b.send(t="next"); await asyncio.sleep(0.3); check("só o anfitrião avança de fase (manual)", a.level["n"] == 0)
+        for _ in range(40):
+            if a.level["n"] == 1: break
+            await asyncio.sleep(0.1)
+        check("avança sozinho para a fase 2 depois da vitória", a.level["n"] == 1 and b.level["n"] == 1 and c.level["n"] == 1, a.level["n"])
 
         print("Entradas e abuso")
         a.send(t="in", x="abc", y=None); a.send(t="in", x=1e99, y=float("inf")); await asyncio.sleep(0.2)

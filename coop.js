@@ -28,7 +28,7 @@
 
   const C = {
     ws: null, url: "", same: false, probed: false, hi: null, you: null, code: "", token: "", room: null, level: null, roles: [],
-    view: "connect", snap: null, snapAt: 0, shown: [null, null, null], emos: [], rtt: null, closing: false, retryTimer: 0, retryStart: 0,
+    view: "connect", snap: null, snapAt: 0, shown: [null, null, null], pose: [null, null, null], emos: [], rtt: null, closing: false, retryTimer: 0, retryStart: 0,
     lastCount: -1, result: null, loseUntil: 0, loseText: "", lastFrame: 0, raf: 0, sentDir: [0, 0], dirAt: 0, goFlash: 0, pausedBy: -1,
   };
 
@@ -140,9 +140,11 @@
     setBusy(true); banner("Conectando…", "info");
     try {
       if (!C.ws || C.ws.readyState !== 1) { C.url = url; C.closing = false; await openSocket(url); }
-      send(kind === "create" ? { t: "create", name } : { t: "join", code, name });
+      const skin = mySkin();
+      send(kind === "create" ? { t: "create", name, skin } : { t: "join", code, name, skin });
     } catch (e) { banner(e.message, "bad"); setBusy(false); }
   }
+  function mySkin() { try { return API.equippedSkin ? API.equippedSkin() : "explorer"; } catch (e) { return "explorer"; } }
   function setBusy(b) { ["co-create", "co-join"].forEach((id) => { $(id).disabled = b; }); }
 
   function onClose(ws) {
@@ -180,7 +182,7 @@
         if (!C.room || C.view === "connect") showView("lobby");
         break;
       case "room": C.room = m; renderLobby(); updateChips(); updatePaused(); break;
-      case "level": C.level = m.level; C.total = m.total; C.roles = m.roles; C.snap = null; C.result = null; C.shown = [null, null, null]; C.emos = []; C.lastCount = -1; buildChips(); showView("game"); sfx("blip"); break;
+      case "level": C.level = m.level; C.total = m.total; C.roles = m.roles; C.snap = null; C.result = null; C.shown = [null, null, null]; C.pose = [null, null, null]; C.wonAt = 0; C.emos = []; C.lastCount = -1; buildChips(); showView("game"); sfx("blip"); break;
       case "s": onSnap(m); break;
       case "ev": onEvent(m.e); break;
       case "paused": banner("Um jogador caiu. O jogo está pausado esperando ele voltar…", "bad"); break;
@@ -196,9 +198,9 @@
   function onSnap(m) {
     const prev = C.snap;
     C.snap = m; C.snapAt = performance.now();
-    if (prev && prev.ph !== "won" && m.ph === "won") showResult();
+    if (prev && prev.ph !== "won" && m.ph === "won") C.wonAt = performance.now();
     if (m.ph === "count" && Math.ceil(m.c) !== C.lastCount) { C.lastCount = Math.ceil(m.c); if (C.lastCount > 0) sfx("tick"); }
-    if (m.ph === "count" && prev && prev.a !== m.a) { C.result = null; hideResult(); C.shown = [null, null, null]; }
+    if (m.ph === "count" && prev && prev.a !== m.a) { C.result = null; hideResult(); C.shown = [null, null, null]; C.pose = [null, null, null]; C.wonAt = 0; }
     if (m.ph !== "count") C.lastCount = -1;
     updateChips();
   }
@@ -305,25 +307,6 @@
     if (off >= 0) banner(`⚠ ${r.players[off].name} caiu. Pausado — esperando voltar (até 30 s).`, "bad");
     else if (C.pausedBy >= 0) banner("Todos voltaram!", "good", 2000);
     C.pausedBy = off;
-  }
-  function showResult() {
-    const s = C.snap, box = $("co-result");
-    const t = C.level.time, el = s.e;
-    box.innerHTML = "";
-    const p = document.createElement("div"); p.className = "panel good";
-    const h = document.createElement("h1"); h.textContent = "Fugiram! 🎉";
-    const tx = document.createElement("p"); tx.textContent = `Tempo da equipe: ${el.toFixed(1)} s de ${t} s · tentativa ${s.a}`;
-    p.append(h, tx);
-    const acts = document.createElement("div"); acts.className = "ov-actions";
-    if (isHost()) {
-      const last = C.level.id >= (C.total || (C.hi ? C.hi.levels.length : 0));
-      const next = btn(last ? "Terminar 🏆" : "Próxima fase ▶", "btn", () => send({ t: "next" }));
-      const again = btn("Repetir", "btn btn-ghost", () => send({ t: "restart" }));
-      const lob = btn("Voltar à sala", "btn btn-ghost", () => send({ t: "lobby" }));
-      acts.append(next, again, lob);
-    } else { const w = document.createElement("p"); w.textContent = "Aguardando o anfitrião escolher o que fazer…"; acts.append(w); }
-    p.append(acts); box.appendChild(p); box.classList.remove("hidden");
-    const f = box.querySelector("button"); if (f) f.focus({ preventScroll: true });
   }
   function hideResult() { $("co-result").classList.add("hidden"); }
   function btn(label, cls, fn) { const b = document.createElement("button"); b.type = "button"; b.className = cls; b.textContent = label; b.addEventListener("click", fn); return b; }
@@ -518,14 +501,24 @@
         let sh = C.shown[i];
         if (!sh || Math.hypot(sh.x - tg[0], sh.y - tg[1]) > 70 || RM()) sh = C.shown[i] = { x: tg[0], y: tg[1] };
         else { sh.x += (tg[0] - sh.x) * k; sh.y += (tg[1] - sh.y) * k; }
-        if (tg[2] === 1) continue;
-        const r = roleOf(i);
+        if (tg[2] === 1) { C.pose[i] = null; continue; }
+        const r = roleOf(i), pl = C.room && C.room.players[i], skin = (pl && pl.skin) || "explorer";
+        let po = C.pose[i];
+        if (!po) po = C.pose[i] = { px: sh.x, py: sh.y, t: 0, fx: i === C.you ? 1 : 1, fy: 0, walk: 0, phase: 0, dash: false, glow: 0, dead: -1, win: false, rm: false };
+        const mx = sh.x - po.px, my = sh.y - po.py, mv = Math.hypot(mx, my);
+        po.px = sh.x; po.py = sh.y; po.t += dt; po.rm = RM();
+        if (mv > 0.05 && mv < 40) { po.fx = mx / mv; po.fy = my / mv; po.phase += mv * 0.28; }
+        po.walk += (Math.min(1, mv / Math.max(dt, 0.001) / 200) - po.walk) * Math.min(1, dt * 14);
         ctx.save(); ctx.translate(sh.x, sh.y);
-        glow(r.color, 12); ctx.fillStyle = r.color; ctx.beginPath(); ctx.arc(0, 0, 11, 0, 7); ctx.fill(); noGlow();
-        ctx.strokeStyle = i === C.you ? "#fff" : "rgba(0,0,0,.5)"; ctx.lineWidth = i === C.you ? 3 : 2; ctx.stroke();
-        ctx.font = "13px sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillStyle = "#000"; ctx.fillText(r.icon, 0, 1);
-        ctx.font = "bold 11px sans-serif"; ctx.textBaseline = "alphabetic"; ctx.lineWidth = 3; ctx.strokeStyle = "rgba(7,6,15,.9)";
-        const label = i === C.you ? "▼ " + name(i) : name(i); ctx.strokeText(label, 0, -17); ctx.fillStyle = i === C.you ? "#fff" : r.color; ctx.fillText(label, 0, -17);
+        // aro no chão com a cor do papel (quem é imune a quê) e destaque para você
+        ctx.lineWidth = i === C.you ? 3 : 2; ctx.strokeStyle = r.color; ctx.globalAlpha = i === C.you ? 1 : 0.8;
+        glow(r.color, 10); ctx.beginPath(); ctx.ellipse(0, 11, 14, 5, 0, 0, Math.PI * 2); ctx.stroke(); noGlow(); ctx.globalAlpha = 1;
+        ctx.restore();
+        if (API.drawCharacter) API.drawCharacter(ctx, sh.x, sh.y, skin, po);
+        else { ctx.save(); ctx.translate(sh.x, sh.y); glow(r.color, 12); ctx.fillStyle = r.color; ctx.beginPath(); ctx.arc(0, 0, 11, 0, 7); ctx.fill(); noGlow(); ctx.restore(); }
+        ctx.save(); ctx.translate(sh.x, sh.y);
+        ctx.font = "bold 11px sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "alphabetic"; ctx.lineWidth = 3; ctx.strokeStyle = "rgba(7,6,15,.9)";
+        const label = (i === C.you ? "▼ " : "") + r.icon + " " + name(i); ctx.strokeText(label, 0, -22); ctx.fillStyle = i === C.you ? "#fff" : r.color; ctx.fillText(label, 0, -22);
         ctx.restore();
       }
     }
@@ -553,6 +546,13 @@
       ctx.fillStyle = "rgba(60,0,15,.55)"; ctx.fillRect(0, 0, W, H);
       ctx.fillStyle = "#ff2d55"; ctx.font = "bold 34px 'Trebuchet MS', sans-serif"; ctx.fillText(C.loseText || "Tentativa perdida", W / 2, H / 2 - 10);
       ctx.fillStyle = "#e9e7ff"; ctx.font = "bold 18px sans-serif"; ctx.fillText("Reiniciando…", W / 2, H / 2 + 30);
+    }
+    if (s && s.ph === "won") {
+      const k = Math.min(1, (now - (C.wonAt || now)) / 250);
+      ctx.globalAlpha = k; ctx.fillStyle = "rgba(7,6,15,.35)"; ctx.fillRect(0, 0, W, H);
+      ctx.fillStyle = "#39ff88"; glow("#39ff88", 18); ctx.font = "bold 64px 'Trebuchet MS', sans-serif"; ctx.fillText("Escaparam! 🎉", W / 2, H / 2 - 6); noGlow();
+      ctx.fillStyle = "#e9e7ff"; ctx.font = "bold 20px sans-serif"; ctx.fillText(`${s.e.toFixed(1)} s de ${C.level.time} s`, W / 2, H / 2 + 44);
+      ctx.globalAlpha = 1;
     }
     // HUD em texto
     const left = Math.max(0, C.level.time - t);

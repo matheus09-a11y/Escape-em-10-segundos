@@ -23,7 +23,7 @@ import struct
 import sys
 import time
 
-from coop_levels import LEVELS, ROLES, ROLE_IDS, public, catalog
+from coop_levels import LEVELS, ROLES, ROLE_IDS, SKIN_IDS, public, catalog
 from coop_sim import Sim
 
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -40,6 +40,7 @@ GRACE_LOBBY = 15.0
 GRACE_PLAY = 30.0
 INPUT_STALE = 0.8            # entrada de direção sem renovar por tanto tempo vira "parado"
 TICK = 1 / 60
+WIN_HOLD = 2.0               # tempo mostrando "escaparam" antes de ir sozinho para a próxima fase
 CODE_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ"
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
@@ -158,6 +159,10 @@ class Conn:
 
 
 # ---------------------------------------------------------------- Salas
+def clean_skin(s):
+    return s if isinstance(s, str) and s in SKIN_IDS else "explorer"
+
+
 def clean_name(s):
     s = re.sub(r"[^\w .!?\-À-ÿ]", "", str(s or ""), flags=re.UNICODE)[:14].strip()
     return s or "Jogador"
@@ -167,6 +172,7 @@ class Slot:
     def __init__(self, idx, name, conn):
         self.idx, self.name, self.conn = idx, name, conn
         self.role = None
+        self.skin = "explorer"
         self.token = secrets.token_urlsafe(12)
         self.dropped = None          # instante da queda (None = conectado)
         self.inp = (0.0, 0.0)
@@ -183,6 +189,7 @@ class Room:
         self.sim = None
         self.task = None
         self.paused = False
+        self.won_at = None
         self.created = time.monotonic()
         self.empty_since = None
 
@@ -198,7 +205,7 @@ class Room:
     def state(self):
         return {
             "t": "room", "code": self.code, "host": self.host, "level": self.level, "phase": self.phase, "paused": self.paused,
-            "players": [None if s is None else {"name": s.name, "role": s.role, "on": bool(s.conn and s.conn.alive)} for s in self.slots],
+            "players": [None if s is None else {"name": s.name, "role": s.role, "skin": s.skin, "on": bool(s.conn and s.conn.alive)} for s in self.slots],
         }
 
     def push_state(self):
@@ -243,6 +250,7 @@ class Room:
     def start_game(self):
         self.phase = "playing"
         self.paused = False
+        self.won_at = None
         lv = LEVELS[self.level]
         self.sim = Sim(lv, [s.role for s in self.slots])
         for s in self.slots:
@@ -252,6 +260,14 @@ class Room:
         if self.task:
             self.task.cancel()
         self.task = asyncio.ensure_future(self.run())
+
+    def advance(self):
+        """Depois da vitória: segue sozinho para a próxima fase (ou encerra na última)."""
+        if self.level + 1 < len(LEVELS):
+            self.level += 1
+            self.start_game()
+        else:
+            self.stop_game("Vocês zeraram o modo cooperativo! 🏆")
 
     def stop_game(self, why=None):
         self.phase = "lobby"
@@ -292,7 +308,14 @@ class Room:
                     continue
                 before = sim.phase
                 if sim.phase == "won":
+                    if self.won_at is None:
+                        self.won_at = now
+                    elif now - self.won_at >= WIN_HOLD:
+                        self.advance()
+                        return
                     nxt += 0.09     # parado: 10 quadros por segundo bastam
+                else:
+                    self.won_at = None
                 sim.tick(TICK)
                 for ev in sim.events:
                     self.broadcast({"t": "ev", "e": list(ev)})
@@ -352,6 +375,7 @@ def handle(conn, m):
             return err(conn, "Não foi possível criar a sala.")
         room = rooms[code] = Room(code)
         room.slots[0] = Slot(0, clean_name(m.get("name")), conn)
+        room.slots[0].skin = clean_skin(m.get("skin"))
         attach(conn, room, 0)
         room.host = 0
         conn.send({"t": "joined", "code": code, "you": 0, "token": room.slots[0].token})
@@ -371,6 +395,7 @@ def handle(conn, m):
         if i is None:
             return err(conn, "A sala está cheia (3 jogadores).")
         r.slots[i] = Slot(i, clean_name(m.get("name")), conn)
+        r.slots[i].skin = clean_skin(m.get("skin"))
         attach(conn, r, i)
         conn.send({"t": "joined", "code": code, "you": i, "token": r.slots[i].token})
         r.reassign_host()
@@ -411,6 +436,9 @@ def handle(conn, m):
             return err(conn, "Esse papel já foi escolhido por outro jogador.")
         me.role = r
         room.push_state()
+    elif t == "skin":
+        me.skin = clean_skin(m.get("id"))
+        room.push_state()
     elif t == "level":
         if conn.slot != room.host or room.phase != "lobby":
             return
@@ -447,11 +475,7 @@ def handle(conn, m):
             room.broadcast(room.sim.snapshot())
     elif t == "next":
         if conn.slot == room.host and room.phase == "playing" and room.sim and room.sim.phase == "won":
-            if room.level + 1 < len(LEVELS):
-                room.level += 1
-                room.start_game()
-            else:
-                room.stop_game("Vocês zeraram o modo cooperativo! 🏆")
+            room.advance()
     elif t == "lobby":
         if conn.slot == room.host and room.phase == "playing":
             room.stop_game("")

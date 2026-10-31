@@ -2218,7 +2218,7 @@
 
   window.GameAPI = {
     reloadAll, showHowTo, N, MISSIONS, SKIN_IDS, openSettingsAgain: () => openSettings(settingsBack), getSettingsBack: () => settingsBack, clearSettingsBack: () => { settingsBack = null; }, hideSettings: () => settingsEl.classList.add("hidden"),
-    G, S, E, showOverlay, hideOverlay, openTimePanel, fmtLimit, releaseInput, showMenu, RM, Sfx, startCustomTest,
+    G, S, E, showOverlay, hideOverlay, openTimePanel, fmtLimit, releaseInput, showMenu, RM, Sfx, startCustomTest, drawCharacter, equippedSkin,
     setState: (st) => { G.state = st; G.custom = false; hideOverlay(); },
     leaveTest: () => { G.custom = false; customBack = null; customWin = null; },
   };

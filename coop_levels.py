@@ -19,6 +19,9 @@ ROLES = {
 }
 ROLE_IDS = list(ROLES)
 
+# skins (só visuais) que cada jogador leva da campanha; o servidor só repassa ids conhecidos
+SKIN_IDS = ["explorer", "astro", "robot", "ninja", "holo", "gold", "scarlet", "speed", "shadow", "titan", "sentinel", "agent", "spectre", "arcane"]
+
 
 def vwall(x, t, gaps):
     """Parede vertical em x (espessura t) de cima a baixo, com vãos [(y0, y1), ...]."""
