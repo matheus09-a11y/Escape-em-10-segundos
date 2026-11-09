@@ -10,7 +10,7 @@
   "use strict";
   const API = window.GameAPI, MK = window.MapKit;
   const $ = (id) => document.getElementById(id);
-  const KEYS = { campaign: "dez-segundos-v1", missions: "dez-segundos-missions-v1", settings: "dez-segundos-settings-v1", custom: MK.KEY };
+  const KEYS = { campaign: "dez-segundos-v1", missions: "dez-segundos-missions-v1", expsolo: "dez-segundos-expsolo-v1", settings: "dez-segundos-settings-v1", custom: MK.KEY };
   const FORMAT = "dez-segundos-backup", VERSION = 2, MAX_FILE = 2000000;
   const N = API.N, MISSION_IDS = API.MISSIONS.map((m) => m.id);
   const panel = $("backup"), body = $("bk-body");
@@ -18,9 +18,9 @@
   /* ---------- leitura do estado atual ---------- */
   function readKey(k) { try { const r = localStorage.getItem(k); return r === null ? null : JSON.parse(r); } catch (e) { return undefined; } }
   function collect() {
-    const out = { campaign: readKey(KEYS.campaign), missions: readKey(KEYS.missions), settings: readKey(KEYS.settings), custom: null };
+    const out = { campaign: readKey(KEYS.campaign), missions: readKey(KEYS.missions), expsolo: readKey(KEYS.expsolo), settings: readKey(KEYS.settings), custom: null };
     const bad = [];
-    for (const k of ["campaign", "missions", "settings"]) if (out[k] === undefined) { bad.push(k); out[k] = null; }
+    for (const k of ["campaign", "missions", "expsolo", "settings"]) if (out[k] === undefined) { bad.push(k); out[k] = null; }
     const l = MK.loadAll();
     if (!l.ok) bad.push("custom"); else if (l.items.length) out.custom = MK.storeObject(l.items);
     return { data: out, unreadable: bad };
@@ -72,6 +72,23 @@
     }
     return out;
   }
+  /** Expansão Solo (opcional: backups antigos não têm esta seção). Chaves "id|dificuldade" conhecidas; recordes por tempo por sala. */
+  function checkExpSolo(m) {
+    const okKey = (k) => { if (typeof k !== "string") return false; const [id, d] = k.split("|"); return API.EXMAPS.some((x) => x.m.id === id) && API.EXS.diffs.includes(d) && k.split("|").length === 2; };
+    const max = API.EXMAPS.length * API.EXS.diffs.length;
+    if (!isObj(m) || m.v !== 1 || !onlyKeys(m, ["v", "done", "coin", "best", "diff"])) throw new Error("Expansão Solo: formato inválido.");
+    const keys = (a, w) => { if (!Array.isArray(a) || a.length > max) throw new Error(w + ": lista inválida."); const seen = new Set(); for (const k of a) { if (!okKey(k) || seen.has(k)) throw new Error(w + ": valor inválido."); seen.add(k); } return [...seen]; };
+    const out = { v: 1, done: keys(m.done || [], "Expansão Solo"), coin: keys(m.coin || [], "Moedas da expansão"), best: {} };
+    if (m.diff !== undefined) { if (!API.EXS.diffs.includes(m.diff)) throw new Error("Expansão Solo: dificuldade inválida."); out.diff = m.diff; }
+    const b = m.best || {};
+    if (!isObj(b) || Object.keys(b).length > max) throw new Error("Expansão Solo: recordes inválidos.");
+    for (const k of Object.keys(b)) {
+      if (!okKey(k) || !isObj(b[k]) || Object.keys(b[k]).length > 400) throw new Error("Expansão Solo: recorde inválido.");
+      out.best[k] = {};
+      for (const lk of Object.keys(b[k])) { if (!/^\d{1,3}$/.test(lk) || !validLimit(Number(lk)) || typeof b[k][lk] !== "number" || !(b[k][lk] > 0 && b[k][lk] < 86400)) throw new Error("Expansão Solo: recorde inválido."); out.best[k][lk] = b[k][lk]; }
+    }
+    return out;
+  }
   function checkSettings(s) {
     const allowed = ["sound", "volume", "reduceFx", "touch", "limit", "customLimit", "limitChosen", "skin"];
     if (!isObj(s) || !onlyKeys(s, allowed)) throw new Error("Configurações: campos inválidos.");
@@ -99,28 +116,30 @@
     try { o = JSON.parse(text); } catch (e) { return { ok: false, error: "O arquivo não é um JSON válido." }; }
     try {
       if (!isObj(o) || o.format !== FORMAT) throw new Error("Isto não é um backup de “Dez segundos para fugir”.");
-      if (!onlyKeys(o, ["format", "version", "game", "exportedAt", "campaign", "missions", "settings", "custom"])) throw new Error("O backup tem campos desconhecidos.");
+      if (!onlyKeys(o, ["format", "version", "game", "exportedAt", "campaign", "missions", "expsolo", "settings", "custom"])) throw new Error("O backup tem campos desconhecidos.");
       if (!Number.isInteger(o.version)) throw new Error("Versão do backup ausente.");
       if (o.version !== 1 && o.version !== 2) throw new Error(`Versão do backup incompatível (arquivo: ${o.version}; este jogo lê as versões 1 e 2).`);
       const data = {
         campaign: o.campaign == null ? null : checkCampaign(o.campaign),
         missions: o.missions == null ? null : checkMissions(o.missions),
+        expsolo: o.expsolo === undefined ? undefined : o.expsolo === null ? null : checkExpSolo(o.expsolo),   // ausente (backup antigo) = não mexe no progresso da expansão
         settings: o.settings == null ? null : checkSettings(o.settings),
         custom: o.custom == null ? null : checkCustom(o.custom),
       };
-      if (!data.campaign && !data.missions && !data.settings && !data.custom) throw new Error("O backup está vazio.");
+      if (!data.campaign && !data.missions && !data.expsolo && !data.settings && !data.custom) throw new Error("O backup está vazio.");
       return { ok: true, data, exportedAt: typeof o.exportedAt === "string" ? o.exportedAt.slice(0, 40) : "" };
     } catch (e) { return { ok: false, error: e.message || "Backup inválido." }; }
   }
 
   /* ---------- resumo (números e nomes entram só via textContent) ---------- */
   function summary(d) {
-    const c = d.campaign, m = d.missions, s = d.settings, cu = d.custom;
+    const c = d.campaign, m = d.missions, s = d.settings, cu = d.custom, ex = d.expsolo;
     const cnt = (a) => (Array.isArray(a) ? a.length : 0);
     const nm = (x) => String(x && x.name !== undefined ? x.name : x.map ? x.map.name : "").slice(0, 40);
     return [
       ["Campanha", c ? `${cnt(c.done)}/${N} fases concluídas · ${cnt(c.coins)} moedas · ${cnt(c.fast)} medalhas ⏱` : "sem dados"],
       ["Missões", m ? `${cnt(m.done)}/${MISSION_IDS.length} concluídas` : "sem dados"],
+      ["Expansão Solo", ex === undefined ? "não incluída (o progresso atual é mantido)" : ex ? `${cnt(ex.done)} fases concluídas (somando dificuldades) · ${cnt(ex.coin)} moedas` : "sem dados"],
       ["Fases criadas", cu && cu.maps && cu.maps.length ? `${cu.maps.length}: ` + cu.maps.slice(0, 5).map(nm).join(", ") + (cu.maps.length > 5 ? "…" : "") : "nenhuma"],
       ["Configurações", s ? `tempo ${s.limit === undefined ? "padrão" : s.limit === 0 ? "sem limite" : s.limit + " s"} · skin ${s.skin || "padrão"} · som ${s.sound === false ? "desligado" : "ligado"}` : "padrão"],
     ];
@@ -141,13 +160,15 @@
   }
   function applyData(data) {
     const j = (v) => (v === null ? null : JSON.stringify(v));
-    return writePlan([[KEYS.campaign, j(data.campaign)], [KEYS.missions, j(data.missions)], [KEYS.custom, j(data.custom)], [KEYS.settings, j(data.settings)]]);
+    const plan = [[KEYS.campaign, j(data.campaign)], [KEYS.missions, j(data.missions)], [KEYS.custom, j(data.custom)], [KEYS.settings, j(data.settings)]];
+    if (data.expsolo !== undefined) plan.push([KEYS.expsolo, j(data.expsolo)]);
+    return writePlan(plan);
   }
 
   /* ---------- exportação ---------- */
   function buildBackupText() {
     const cur = collect();
-    const obj = { format: FORMAT, version: VERSION, game: "1.0", exportedAt: new Date().toISOString(), campaign: cur.data.campaign, missions: cur.data.missions, settings: cur.data.settings, custom: cur.data.custom };
+    const obj = { format: FORMAT, version: VERSION, game: "1.0", exportedAt: new Date().toISOString(), campaign: cur.data.campaign, missions: cur.data.missions, expsolo: cur.data.expsolo, settings: cur.data.settings, custom: cur.data.custom };
     return { text: JSON.stringify(obj, null, 1), unreadable: cur.unreadable };
   }
   function download(text) {
@@ -287,7 +308,7 @@
       el("div", { class: "ov-actions" },
         btn("Exportar antes", () => { m.textContent = download(buildBackupText().text) ? "Download solicitado. Confira o arquivo antes de apagar." : "Não foi possível baixar. Cancele e use “Exportar progresso” para copiar o texto."; }),
         btn("Apagar definitivamente", () => {
-          const plan = [[KEYS.campaign, null], [KEYS.missions, null]];
+          const plan = [[KEYS.campaign, null], [KEYS.missions, null], [KEYS.expsolo, null]];
           if (chk.checked) plan.push([KEYS.custom, null]);
           const w = writePlan(plan);
           if (!w.ok) { m.textContent = w.error; return; }

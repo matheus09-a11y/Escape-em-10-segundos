@@ -17,7 +17,14 @@
   /** Sala em jogo: índices >= N são missões (N + índice da missão); abaixo disso, a campanha. */
   const CUSTOM_IDX = N + MISSIONS.length; // índice reservado para a fase personalizada em teste (editor)
   let customLv = null, customBack = null, customWin = null; // sala do editor em teste e como voltar ao editor
-  const lvAt = (i) => (i === CUSTOM_IDX ? customLv : i >= N ? MISSIONS[i - N].level : LEVELS[i]);
+  // ---- Expansão Solo (modo extra para uma pessoa, sem servidor). Dados em expansao_solo.js; cada fase tem 3 variantes (fácil/normal/difícil).
+  const EXS = window.EXP_SOLO || { chapters: [], diffs: ["easy", "normal", "hard"], goal: 50, recommended: 25 }, EKEY = "dez-segundos-expsolo-v1";
+  const EXMAPS = []; EXS.chapters.forEach((ch) => ch.maps.forEach((m) => EXMAPS.push({ m, ch })));
+  const EXLV = EXMAPS.map((x) => EXS.diffs.map((d) => E.normalize(x.m.build(d)))); // [fase][dificuldade]
+  const EXDN = { easy: "Fácil", normal: "Normal", hard: "Difícil" };
+  const EXP_SECTOR = (ix) => window.SECTORS[1 + (EXMAPS[Math.floor((ix - EXP_BASE) / 3)].ch.n - 1) % 4]; // cada capítulo usa um cenário
+  const EXP_BASE = CUSTOM_IDX + 1; // índices >= EXP_BASE são fases da expansão: EXP_BASE + 3 * fase + dificuldade
+  const lvAt = (i) => (i === CUSTOM_IDX ? customLv : i >= EXP_BASE ? EXLV[Math.floor((i - EXP_BASE) / 3)][(i - EXP_BASE) % 3] : i >= N ? MISSIONS[i - N].level : LEVELS[i]);
   const NONSTOP_TOL = 6; // "sem parar": deslocamento mínimo (u) a partir da âncora para contar como movimento (ignora oscilações)
   const NONSTOP_MAX = 1.0; // segundos seguidos parado permitidos
   /** Núcleo da campanha = salas dos setores que não são "extra" (1-20): a sala 20 dispara o final. */
@@ -104,6 +111,7 @@
     deadAt: -9, // instante da derrota (animação)
     fade: 0, // transição breve ao entrar numa sala
     mission: -1, // índice da missão em jogo (-1 = campanha)
+    exs: -1, // índice (fase*3+dificuldade) da Expansão Solo em jogo (-1 = não)
     custom: false, // true = testando uma fase do editor (não concede nada a outros modos)
     noDash: false, // restrição da missão "sem impulso"
     frag: 0, // máscara de fragmentos coletados (missão "coleta completa")
@@ -190,8 +198,8 @@
   }
   function clearProgress() {
     P.unlocked = 0; P.done = new Set(); P.coins = new Set(); P.fast = new Set(); P.best = {}; P.bestBy = {}; P.attempts = 0; P.finished = false;
-    MP.done = new Set(); MP.orig = new Set(); MP.best = {};
-    try { localStorage.removeItem(SAVE_KEY); localStorage.removeItem(MKEY); } catch (e) {}
+    MP.done = new Set(); MP.orig = new Set(); MP.best = {}; EP.done = new Set(); EP.coin = new Set(); EP.best = {};
+    try { localStorage.removeItem(SAVE_KEY); localStorage.removeItem(MKEY); localStorage.removeItem(EKEY); } catch (e) {}
   }
   const fmt = (t) => (t === undefined || t === null ? "—" : t.toFixed(2) + " s");
 
@@ -209,6 +217,31 @@
     } catch (e) { /* sem storage ou dado inválido: começa do zero */ }
   }
   function saveMissions() { try { localStorage.setItem(MKEY, JSON.stringify({ v: 1, done: [...MP.done], orig: [...MP.orig], best: MP.best })); } catch (e) {} }
+  /* ---- Progresso da EXPANSÃO SOLO: espaço próprio. Chave "id|dificuldade": resultados nunca se misturam entre dificuldades; recordes também por tempo (limite). ---- */
+  const EP = { done: new Set(), coin: new Set(), best: {}, diff: "normal" };
+  const exKeyOk = (k) => { const [id, d] = String(k).split("|"); return EXMAPS.some((x) => x.m.id === id) && EXS.diffs.includes(d); };
+  function loadExp() {
+    EP.done = new Set(); EP.coin = new Set(); EP.best = {}; EP.diff = "normal";
+    try {
+      const d = JSON.parse(localStorage.getItem(EKEY));
+      if (!d) return;
+      (Array.isArray(d.done) ? d.done : []).forEach((k) => { if (exKeyOk(k)) EP.done.add(k); });
+      (Array.isArray(d.coin) ? d.coin : []).forEach((k) => { if (exKeyOk(k)) { EP.coin.add(k); EP.done.add(k); } });
+      if (EXS.diffs.includes(d.diff)) EP.diff = d.diff;
+      if (d.best && typeof d.best === "object") for (const k of Object.keys(d.best)) { if (!exKeyOk(k) || typeof d.best[k] !== "object") continue; for (const lk of Object.keys(d.best[k])) { const v = +d.best[k][lk]; if (v > 0 && v < 86400) (EP.best[k] = EP.best[k] || {})[lk] = v; } }
+    } catch (e) { /* sem storage ou dado inválido: começa do zero */ }
+  }
+  function saveExp() { try { localStorage.setItem(EKEY, JSON.stringify({ v: 1, done: [...EP.done], coin: [...EP.coin], best: EP.best, diff: EP.diff })); } catch (e) {} }
+  const exKey = (mi, d) => `${EXMAPS[mi].m.id}|${d}`;
+  const exIdx = (mi, d) => EXP_BASE + 3 * mi + EXS.diffs.indexOf(d);
+  const expUnlocked = () => P.done.has(10); // libera ao concluir a sala 11 (Impulso): a expansão usa impulso
+  const mapDone = (mi) => EXS.diffs.some((d) => EP.done.has(exKey(mi, d)));
+  const expReq = (mi) => {
+    if (!expUnlocked()) return "Conclua a sala 11 (Impulso) da campanha para liberar a Expansão Solo.";
+    if (mi > 0 && EXMAPS[mi].ch === EXMAPS[mi - 1].ch && !mapDone(mi - 1)) return `Conclua "${EXMAPS[mi - 1].m.name}" (em qualquer dificuldade).`;
+    if (mi > 0 && EXMAPS[mi].ch !== EXMAPS[mi - 1].ch && !EXMAPS.filter((x) => x.ch === EXMAPS[mi - 1].ch).every((x) => mapDone(EXMAPS.indexOf(x)))) return "Conclua o capítulo anterior.";
+    return "";
+  };
   const missionsUnlocked = () => P.done.has(9); // modo liberado ao concluir a fase 10
   const missionAvail = (m) => missionsUnlocked() && P.done.has(m.base - 1); // e a sala-base precisa estar concluída
   const missionBest = (m, limit) => (MP.best[m.id] || {})[String(limit)];
@@ -328,7 +361,7 @@
     } else if (e.code === "KeyR") {
       if (G.state === "ready" || G.state === "playing" || G.state === "lost") retry();
     } else if (e.code === "Escape") {
-      if (IN_LEVEL.includes(G.state)) { if (G.custom) { if (customBack) customBack(); } else if (G.mission >= 0) openMissions(); else openSelect(); }
+      if (IN_LEVEL.includes(G.state)) { if (G.custom) { if (customBack) customBack(); } else if (G.exs >= 0) openExp(); else if (G.mission >= 0) openMissions(); else openSelect(); }
     } else if (e.code === "Enter" && !overlayEl.classList.contains("hidden")) {
       e.preventDefault();
       primaryBtn.click();
@@ -450,7 +483,7 @@
   function hideOverlay() { overlayEl.classList.add("hidden"); primaryBtn.onclick = null; secondaryBtn.onclick = null; tertiaryBtn.onclick = null; quaternaryBtn.onclick = null; quinaryBtn.onclick = null; senaryBtn.onclick = null; }
 
   function updateHud() {
-    hudLevel.textContent = G.custom ? "TESTE" : G.mission >= 0 ? `M${G.mission + 1}/${MISSIONS.length}` : `${G.levelIdx + 1}/${N}`;
+    hudLevel.textContent = G.custom ? "TESTE" : G.exs >= 0 ? `E${Math.floor((G.exs - EXP_BASE) / 3) + 1}/${EXMAPS.length}` : G.mission >= 0 ? `M${G.mission + 1}/${MISSIONS.length}` : `${G.levelIdx + 1}/${N}`;
     hudKey.textContent = G.hasKey ? "✔" : "✖";
     hudKey.className = G.hasKey ? "key-on" : "key-off";
     hudCoin.textContent = G.coin ? "●" : "○";
@@ -703,6 +736,8 @@
     G.winCam = null;
     G.state = "missions";
     hideOverlay(); settingsEl.classList.add("hidden"); timeEl.classList.add("hidden"); charEl.classList.add("hidden"); stopCharLoop(); selectEl.classList.add("hidden"); skipBtn.classList.add("hidden");
+    $("mis-title").textContent = "Missões";
+    $("mis-note").textContent = "Missões não alteram moedas, medalhas nem recordes da campanha. Concluir em qualquer tempo vale; em 10 s você ganha também o selo \"Desafio original\".";
     $("mis-info").textContent = missionsUnlocked()
       ? `Concluídas: ${MP.done.size}/${MISSIONS.length} · Selos "Desafio original": ${MP.orig.size}/${MISSIONS.length} · Tempo por sala: ${fmtLimit(S.limit)}`
       : "Modo bloqueado: conclua a fase 10 da campanha para liberar.";
@@ -748,7 +783,7 @@
     });
   }
   function startMission(mi) {
-    G.mission = mi; G.custom = false;
+    G.mission = mi; G.exs = -1; G.custom = false;
     loadLevel(N + mi);
     G.fade = RM() ? 0 : 0.35;
     beginAttempt();
@@ -788,6 +823,101 @@
         primary: nx >= 0 ? { label: "Próxima missão", fn: () => openBrief(nx) } : { label: "Repetir", fn: () => startMission(mi) },
         secondary: nx >= 0 ? { label: "Repetir", fn: () => startMission(mi) } : { label: "Voltar à lista", fn: () => openMissions() },
         tertiary: nx >= 0 ? { label: "Voltar à lista", fn: () => openMissions() } : null,
+        kind: "good",
+      });
+    };
+    if (RM()) showResult(); else G.winCam = { t: 0, dur: 1.0, show: showResult };
+    updateHud();
+  }
+
+
+  /* ------------------------------------------------------------------
+   * EXPANSÃO SOLO: lista por capítulo (escolha de dificuldade), briefing, jogo e resultado. Reaproveita o painel das missões.
+   * Dados em expansao_solo.js; progresso em EP. Não mexe na campanha, nas missões nem nos recordes delas.
+   * ------------------------------------------------------------------ */
+  function openExp(diff) {
+    if (typeof diff === "string" && EXS.diffs.includes(diff)) { EP.diff = diff; saveExp(); }
+    releaseInput();
+    G.winCam = null;
+    G.state = "missions";
+    hideOverlay(); settingsEl.classList.add("hidden"); timeEl.classList.add("hidden"); charEl.classList.add("hidden"); stopCharLoop(); selectEl.classList.add("hidden"); skipBtn.classList.add("hidden");
+    $("mis-title").textContent = "Expansão Solo";
+    const doneIn = (d) => EXMAPS.filter((_, mi) => EP.done.has(exKey(mi, d))).length;
+    $("mis-info").textContent = expUnlocked()
+      ? `Dificuldade ${EXDN[EP.diff]}: ${doneIn(EP.diff)}/${EXMAPS.length} concluídas · Tempo recomendado: ${EXS.recommended} s (você escolhe o tempo por sala: ${fmtLimit(S.limit)}) · Meta da expansão: ${EXS.goal} fases (${EXMAPS.length} prontas)`
+      : "Modo bloqueado: conclua a sala 11 (Impulso) da campanha para liberar.";
+    const fl = $("mis-filter");
+    fl.textContent = "";
+    EXS.diffs.forEach((d) => {
+      const b = document.createElement("button");
+      b.textContent = EXDN[d]; b.setAttribute("role", "radio"); b.setAttribute("aria-checked", String(EP.diff === d));
+      b.addEventListener("click", () => openExp(d));
+      fl.appendChild(b);
+    });
+    const grid = $("mis-grid");
+    grid.textContent = "";
+    let lastCh = null;
+    EXMAPS.forEach((x, mi) => {
+      if (x.ch !== lastCh) {
+        lastCh = x.ch;
+        const h = document.createElement("div"); h.style.gridColumn = "1 / -1"; h.innerHTML = `<b>${x.ch.title}</b><br><small>${x.ch.intro}</small>`; grid.appendChild(h);
+      }
+      const req = expReq(mi), k = exKey(mi, EP.diff), done = EP.done.has(k), coin = EP.coin.has(k);
+      const b = document.createElement("button");
+      b.className = "mis-card " + (req ? "locked" : done ? "done" : "avail");
+      b.innerHTML = `<b>${mi + 1}. ${x.m.name}</b><small>🎯 ${x.m.goal}</small>` +
+        `<span class="st">${req ? "🔒 " + req : done ? "✔ Concluída" : "▶ Disponível"}${coin ? ' <span class="seal">● moeda</span>' : ""}</span>`;
+      b.setAttribute("aria-label", `${x.m.name}, ${EXDN[EP.diff]}. ${req ? "Bloqueada: " + req : done ? "Concluída" : "Disponível"}`);
+      b.addEventListener("click", () => { if (req) $("mis-info").textContent = "🔒 " + req; else openExpBrief(mi); });
+      grid.appendChild(b);
+    });
+    $("mis-note").textContent = "A Expansão Solo não altera moedas, medalhas nem recordes da campanha ou das missões. Cada dificuldade tem resultado, moeda e recordes próprios (e recordes também por tempo por sala). A meta ⏱ da campanha só vale no modo 10 s.";
+    missEl.classList.remove("hidden");
+    updateHud();
+  }
+  function openExpBrief(mi) {
+    const x = EXMAPS[mi], k = exKey(mi, EP.diff), best = (EP.best[k] || {})[String(S.limit)];
+    G.state = "brief";
+    showOverlay({
+      title: `${mi + 1}. ${x.m.name} — ${EXDN[EP.diff]}`,
+      text: `🎯 Objetivo: ${x.m.goal}\nEnsina: ${x.m.teaches}\nTempo por sala: ${fmtLimit(S.limit)} (recomendado: ${EXS.recommended} s)` +
+        (S.limit > 0 && S.limit < EXS.recommended ? "\n⚠ Menos que o tempo recomendado é um desafio extra: pode ser impossível." : "") +
+        `\nMelhor (${fmtMode(S.limit)}, ${EXDN[EP.diff]}): ${fmt(best)}`,
+      primary: { label: "Começar", fn: () => startExp(mi) },
+      secondary: { label: "Voltar", fn: () => openExp() },
+      tertiary: { label: "Tempo por sala ⏱", fn: () => openTimePanel({ mode: "select", back: () => openExpBrief(mi), onDone: () => openExpBrief(mi) }) },
+    });
+  }
+  function startExp(mi) {
+    G.mission = -1; G.custom = false; G.exs = exIdx(mi, EP.diff);
+    loadLevel(G.exs);
+    G.fade = RM() ? 0 : 0.35;
+    beginAttempt();
+  }
+  const nextExp = (mi) => { for (let k = mi + 1; k < EXMAPS.length; k++) if (!expReq(k)) return k; return -1; };
+  function winExp() {
+    const mi = Math.floor((G.exs - EXP_BASE) / 3), d = EXS.diffs[(G.exs - EXP_BASE) % 3], x = EXMAPS[mi], k = exKey(mi, d), limit = G.limit;
+    G.state = "won"; G.dash = null; G.vel = { x: 0, y: 0 };
+    const time = Math.round(G.elapsed * 100) / 100, bm = EP.best[k] || (EP.best[k] = {}), prev = bm[String(limit)];
+    const newDone = !EP.done.has(k), newCoin = G.coin && !EP.coin.has(k), isRecord = prev !== undefined && time < prev, first = prev === undefined;
+    EP.done.add(k); if (G.coin) EP.coin.add(k);
+    if (first || time < prev) bm[String(limit)] = time;
+    saveExp();
+    Sfx.play("win");
+    const lv = lvAt(G.levelIdx);
+    burst(lv.door.x, lv.door.y, "#39ff88", 40, 280);
+    const mode = fmtMode(limit);
+    const extra = `<div class="times">Tempo: <b>${fmt(time)}</b> · Melhor (${mode}, ${EXDN[d]}): <b>${fmt(bm[String(limit)])}</b></div>` +
+      (isRecord ? `<div class="record">★ Novo recorde (${mode})! Antes: ${fmt(prev)}</div>` : first ? `<div>Primeiro tempo registrado (${mode}, ${EXDN[d]}).</div>` : "") +
+      `<div class="medals"><span class="medal on${newDone ? " new" : ""}">✔ Concluída (${EXDN[d]})${newDone ? " ★ novo" : ""}</span><span class="medal${EP.coin.has(k) ? " on" : ""}${newCoin ? " new" : ""}">● Moeda${newCoin ? " ★ nova" : ""}</span></div>`;
+    const nx = nextExp(mi);
+    const showResult = () => {
+      if (G.state !== "won") return;
+      showOverlay({
+        title: "Fase concluída!", text: `${x.m.name} — ${EXDN[d]}`, extra,
+        primary: nx >= 0 ? { label: "Próxima fase", fn: () => openExpBrief(nx) } : { label: "Repetir", fn: () => startExp(mi) },
+        secondary: nx >= 0 ? { label: "Repetir", fn: () => startExp(mi) } : { label: "Voltar à lista", fn: () => openExp() },
+        tertiary: nx >= 0 ? { label: "Voltar à lista", fn: () => openExp() } : null,
         kind: "good",
       });
     };
@@ -846,7 +976,7 @@
     updateHud();
   }
   $("sel-back").addEventListener("click", showMenu);
-  $("btn-levels").addEventListener("click", (e) => { e.currentTarget.blur(); if (IN_LEVEL.includes(G.state)) { if (G.custom) { if (customBack) customBack(); } else if (G.mission >= 0) openMissions(); else openSelect(); } });
+  $("btn-levels").addEventListener("click", (e) => { e.currentTarget.blur(); if (IN_LEVEL.includes(G.state)) { if (G.custom) { if (customBack) customBack(); } else if (G.exs >= 0) openExp(); else if (G.mission >= 0) openMissions(); else openSelect(); } });
 
   /* ------------------------------------------------------------------
    * 5. FLUXO DO JOGO
@@ -856,7 +986,7 @@
     G.state = "menu";
     selectEl.classList.add("hidden");
     loadProgress();
-    loadMissions();
+    loadMissions(); loadExp();
     const progress = hasProgress();
     const allDone = P.done.size >= N;
     const startCampaign = () => {
@@ -874,6 +1004,8 @@
         { label: "Seleção de fases", sub: progress ? `Moedas ${P.coins.size}/${N}` : "Fases 1–" + N, fn: () => openSelect() },
         { label: misOk ? "Missões 🎯" : "Missões 🔒", sub: misOk ? `${MP.done.size}/${MISSIONS.length} concluídas` : "Conclua a fase 10 da campanha", locked: !misOk,
           onLocked: () => { const sb = menuEl.querySelectorAll(".menu-item")[2].querySelector("small"); sb.textContent = "🔒 Falta concluir a fase 10 da campanha."; }, fn: () => openMissions() },
+        { label: expUnlocked() ? "Expansão Solo 🧭" : "Expansão Solo 🔒", sub: expUnlocked() ? `${EXMAPS.filter((_, mi) => mapDone(mi)).length}/${EXMAPS.length} fases concluídas (meta: ${EXS.goal})` : "Conclua a sala 11 da campanha", locked: !expUnlocked(),
+          onLocked: () => { const sb = menuEl.querySelectorAll(".menu-item")[3].querySelector("small"); sb.textContent = "🔒 Falta concluir a sala 11 (Impulso) da campanha."; }, fn: () => openExp() },
         { label: "Tempo por sala ⏱", sub: fmtLimit(S.limit), fn: () => openTimePanel({ mode: "select", back: showMenuKeep, onDone: showMenuKeep }) },
         { label: "Online · 3 jogadores 🌐", sub: "Cooperativo: ajudem-se a fugir", fn: () => { if (window.OnlineCoop) window.OnlineCoop.open(); } },
         { label: "Criar fase ✏", sub: "Editor e Minhas fases", fn: () => { if (window.Editor) window.Editor.openHub(); } },
@@ -883,7 +1015,7 @@
       ],
       primary: { label: "Continuar", fn: startCampaign },
     });
-    G.mission = -1; G.custom = false;
+    G.mission = -1; G.exs = -1; G.custom = false;
     loadLevel(Math.min(P.unlocked, N - 1), true);
   }
 
@@ -912,7 +1044,7 @@
 
   /** Abre uma fase vinda do menu/seleção/“próxima”: mostra a instrução, se houver. */
   function enterLevel(idx) {
-    G.mission = -1; // campanha
+    G.mission = -1; G.exs = -1; // campanha
     G.custom = false;
     loadLevel(idx);
     G.fade = RM() ? 0 : 0.35; // transição breve (escurece→revela; sem flash); desligada com efeitos reduzidos
@@ -973,9 +1105,11 @@
     G.flash = 0;
     particles = [];
     rings = [];
-    const sc = sectorOf(G.mission >= 0 ? MISSIONS[G.mission].base - 1 : idx);
+    const sc = G.exs >= 0 ? EXP_SECTOR(G.exs) : sectorOf(G.mission >= 0 ? MISSIONS[G.mission].base - 1 : idx);
     hintEl.textContent = G.custom
       ? `Teste do editor · ${lv.name} — nada deste teste vale moedas, medalhas, skins ou recordes · ${limitWord(G.limit)}`
+      : G.exs >= 0
+      ? `Expansão Solo · ${EXMAPS[Math.floor((G.exs - EXP_BASE) / 3)].m.name} (${EXDN[EXS.diffs[(G.exs - EXP_BASE) % 3]]}) — ${lv.hint} · ${limitWord(G.limit)}`
       : G.mission >= 0
       ? `Missão ${G.mission + 1}/${MISSIONS.length} · ${lv.name} — ${MGOALS[lv.mission.goal].short} · ${limitWord(G.limit)}`
       : `${sc.name} · ${lv.name} — ${lv.hint} · ${limitWord(G.limit)}` + (G.limit === 10 ? ` · meta ⏱ ${lv.target} s` : " · ⏱ só no modo 10 s");
@@ -995,7 +1129,7 @@
     G.dash = null;
     G.vel = { x: 0, y: 0 }; // sem deslizar depois da derrota
     Sfx.play("lose");
-    if (G.mission < 0 && !G.custom) { P.attempts++; saveProgress(); } // missões e testes do editor não mexem nos dados da campanha
+    if (G.mission < 0 && G.exs < 0 && !G.custom) { P.attempts++; saveProgress(); } // missões e testes do editor não mexem nos dados da campanha
     if (!RM()) { G.shake = 0.45; G.flash = 1; }
     burst(G.pos.x, G.pos.y, "#ff2d55", 36, 260);
     burst(G.pos.x, G.pos.y, "#ffffff", 12, 160);
@@ -1014,6 +1148,10 @@
     const mm = G.mission >= 0;
     if (G.custom) {
       showOverlay({ title: "Você perdeu", text: `${msg}\nÉ só um teste: nada é registrado.`, primary: { label: "Tentar novamente", fn: retry }, secondary: { label: "Voltar ao editor", fn: () => customBack && customBack() }, kind: "bad" });
+      return;
+    }
+    if (G.exs >= 0) {
+      showOverlay({ title: "Você perdeu", text: msg, primary: { label: "Tentar novamente", fn: retry }, secondary: { label: "Expansão Solo", fn: () => openExp() }, kind: "bad" });
       return;
     }
     showOverlay({
@@ -1060,6 +1198,7 @@
   function win() {
     if (G.state !== "playing") return;
     if (G.custom) return winCustom();
+    if (G.exs >= 0) return winExp();
     if (G.mission >= 0) return winMission();
     const idx = G.levelIdx, lv = LEVELS[idx];
     G.state = "won";
@@ -1369,7 +1508,7 @@
   function noGlow() { ctx.shadowBlur = 0; }
   const wave = (speed, amp) => (RM() ? 0 : Math.sin(G.time * speed) * amp);
 
-  const theme = () => sectorOf(G.mission >= 0 ? MISSIONS[G.mission].base - 1 : G.levelIdx).theme;
+  const theme = () => (G.exs >= 0 ? EXP_SECTOR(G.exs) : sectorOf(G.mission >= 0 ? MISSIONS[G.mission].base - 1 : G.levelIdx)).theme;
   const doorReady = (lv) => G.hasKey && E.fragmentsDone(lv, G); // porta pronta: chave + (missão de coleta) todos os fragmentos
 
   function drawBackground() {
@@ -2182,7 +2321,7 @@
   function startCustomTest(level, back, onWin) {
     customLv = E.normalize(level);
     customBack = back; customWin = onWin || null;
-    G.mission = -1; G.custom = true; G.winCam = null;
+    G.mission = -1; G.exs = -1; G.custom = true; G.winCam = null;
     G.state = "brief";
     const brief = () => showOverlay({
       title: "Testar fase",
@@ -2195,7 +2334,7 @@
   }
   /** Recarrega tudo o que vem do armazenamento (depois de importar ou apagar um backup). */
   function reloadAll() {
-    loadSettings(); applySettings(); loadProgress(); loadMissions();
+    loadSettings(); applySettings(); loadProgress(); loadMissions(); loadExp();
     const st = G.state;
     if (st !== "menu") { G.winCam = null; G.custom = false; customBack = null; }
   }
@@ -2217,13 +2356,13 @@
   syncInert();
 
   window.GameAPI = {
-    reloadAll, showHowTo, N, MISSIONS, SKIN_IDS, openSettingsAgain: () => openSettings(settingsBack), getSettingsBack: () => settingsBack, clearSettingsBack: () => { settingsBack = null; }, hideSettings: () => settingsEl.classList.add("hidden"),
+    reloadAll, showHowTo, N, MISSIONS, EXMAPS, EXS, SKIN_IDS, openSettingsAgain: () => openSettings(settingsBack), getSettingsBack: () => settingsBack, clearSettingsBack: () => { settingsBack = null; }, hideSettings: () => settingsEl.classList.add("hidden"),
     G, S, E, showOverlay, hideOverlay, openTimePanel, fmtLimit, releaseInput, showMenu, RM, Sfx, startCustomTest, drawCharacter, equippedSkin,
     setState: (st) => { G.state = st; G.custom = false; hideOverlay(); },
     leaveTest: () => { G.custom = false; customBack = null; customWin = null; },
   };
 
-  window.__game = { startCustomTest, CUSTOM_IDX, MP, MISSIONS, missionReq, missionAvail, missionsUnlocked, openMissions, openBrief, startMission, loadMissions, saveMissions, lvAt, skipCam, finishWinCam, camZoom, G, P, S, SKINS, skinProgress, unlockedSkinIds, equippedSkin, openCharacter, closeCharacter, drawCharacter, POSE, CORE_N, LEVELS, openTimePanel, readTimeChoice, bestFor, fmtLimit, E, inputVector, keys, step: update, retry, pause: pauseIfNeeded, resume, openSelect, enterLevel, showMenu, loadProgress, draw, tryDash, saveProgress, S, Sfx, applySettings, openSettings, closeSettings, skipEnding, sectorOf, RM };
+  window.__game = { EP, EXMAPS, EXS, openExp, openExpBrief, startExp, expReq, expUnlocked, loadExp, startCustomTest, CUSTOM_IDX, MP, MISSIONS, missionReq, missionAvail, missionsUnlocked, openMissions, openBrief, startMission, loadMissions, saveMissions, lvAt, skipCam, finishWinCam, camZoom, G, P, S, SKINS, skinProgress, unlockedSkinIds, equippedSkin, openCharacter, closeCharacter, drawCharacter, POSE, CORE_N, LEVELS, openTimePanel, readTimeChoice, bestFor, fmtLimit, E, inputVector, keys, step: update, retry, pause: pauseIfNeeded, resume, openSelect, enterLevel, showMenu, loadProgress, draw, tryDash, saveProgress, S, Sfx, applySettings, openSettings, closeSettings, skipEnding, sectorOf, RM };
 
   applySettings(); // preferências salvas valem já na primeira tela
   resize();

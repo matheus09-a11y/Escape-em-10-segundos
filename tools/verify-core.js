@@ -141,7 +141,7 @@
     const cell = useVel ? 20 : CELL; // com gelo o estado é maior (velocidade): grade mais grossa
     let frontier = [{ x: lv.start.x, y: lv.start.y, key: false, coin: false, dash: false, rt: E.newRuntime(lv), vel: { x: 0, y: 0 }, frag: 0, moved: false, par: null }];
     const out = { any: null, coin: null };
-    const steps = Math.round(E.TIME_LIMIT / DT);
+    const steps = Math.round((o.limit || E.TIME_LIMIT) / DT); // o.limit: fases da expansão têm 25 s recomendados
     for (let k = 1; k <= steps; k++) {
       const seen = new Set();
       const next = [];
